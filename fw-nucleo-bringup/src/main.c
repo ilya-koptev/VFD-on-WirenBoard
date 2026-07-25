@@ -319,11 +319,46 @@ static void fb_line(int x0, int y0, int x1, int y1)
 }
 
 /* Логотип Wiren Board во весь экран (данные в logo.h) */
-static void fb_logo(void)
+static uint32_t xrand(void);        /* определён ниже, у куба */
+static float logo_x = -32.0f, logo_y = 2.0f;      /* левый верхний угол лого */
+static float logo_vx = 0.55f, logo_vy = 0.22f;
+
+/* Лого со смещением: то, что вышло за поле, просто обрезается */
+static void fb_logo_at(int ox, int oy)
 {
-    for (int y = 0; y < 32; y++)
-        for (int x = 0; x < 128; x++)
-            fb_set(x, y, (LOGO[y][x >> 3] >> (7 - (x & 7))) & 1);
+    fb_clear();
+    for (int y = 0; y < LOGO_H; y++) {
+        int fy = oy + y;
+        if (fy < 0 || fy >= 32) continue;
+        for (int x = 0; x < LOGO_W; x++) {
+            int fx = ox + x;
+            if (fx < 0 || fx >= 128) continue;
+            if ((LOGO[y][x >> 3] >> (7 - (x & 7))) & 1) fb_set(fx, fy, 1);
+        }
+    }
+}
+
+static void fb_logo(void) { fb_logo_at((128 - LOGO_W) / 2, (32 - LOGO_H) / 2); }
+
+/* Плавное блуждание лого. Границы подобраны так, чтобы картинка вылезала
+   за поле примерно на треть своей ширины с каждой стороны. */
+static void logo_move(void)
+{
+    logo_vx += ((int)(xrand() % 200) - 100) / 2600.0f;
+    logo_vy += ((int)(xrand() % 200) - 100) / 4200.0f;
+    if (logo_vx >  0.8f) logo_vx =  0.8f;
+    if (logo_vx < -0.8f) logo_vx = -0.8f;
+    if (logo_vy >  0.30f) logo_vy =  0.30f;
+    if (logo_vy < -0.30f) logo_vy = -0.30f;
+    logo_x += logo_vx; logo_y += logo_vy;
+
+    const float xmin = -(float)LOGO_W / 3.0f;            /* треть вылезает слева */
+    const float xmax = 128.0f - (float)LOGO_W * 2.0f / 3.0f;
+    const float ymin = -4.0f, ymax = 32.0f - (float)LOGO_H + 4.0f;
+    if (logo_x < xmin) { logo_x = xmin; logo_vx = -logo_vx; }
+    if (logo_x > xmax) { logo_x = xmax; logo_vx = -logo_vx; }
+    if (logo_y < ymin) { logo_y = ymin; logo_vy = -logo_vy; }
+    if (logo_y > ymax) { logo_y = ymax; logo_vy = -logo_vy; }
 }
 
 /* Вращающийся куб: 8 вершин, 12 рёбер, поворот вокруг двух осей,
@@ -866,7 +901,10 @@ static void handle(char *line)
     else if (!strcmp(c, "chk"))    { fb_clear(); fb_checker(a ? atoi(a) : 4); up("ok\r\n"); }
     else if (!strcmp(c, "hline"))  { if (a) { fb_clear(); fb_hline(atoi(a)); up("ok\r\n"); } }
     else if (!strcmp(c, "vline"))  { if (a) { fb_clear(); fb_vline(atoi(a)); up("ok\r\n"); } }
-    else if (!strcmp(c, "logo"))   { anim = 0; fb_logo(); up("логотип Wiren Board\r\n"); }
+    else if (!strcmp(c, "logo"))   {   /* logo — по центру, logo m — плавает по полю */
+        if (a && a[0] == 'm') { anim = 2; up("лого плавает\r\n"); }
+        else { anim = 0; fb_logo(); up("логотип Wiren Board\r\n"); }
+    }
     else if (!strcmp(c, "cube"))   {   /* cube [масштаб] — вращающийся куб */
         if (a) cube_scale = (float)atoi(a);
         anim = 1; up("куб пошёл\r\n");
@@ -1064,9 +1102,8 @@ int main(void)
     while (1) {
         if (anim && HAL_GetTick() - t_anim >= 40) {   /* 25 кадров в секунду */
             t_anim = HAL_GetTick();
-            cube_ang += 0.10f;
-            cube_move();
-            fb_cube(cube_ang);
+            if (anim == 2) { logo_move(); fb_logo_at((int)logo_x, (int)logo_y); }
+            else { cube_ang += 0.10f; cube_move(); fb_cube(cube_ang); }
         }
         if (dirty) rebuild();
         scan_frame();
