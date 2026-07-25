@@ -812,6 +812,37 @@ static void handle(char *line)
     else if (!strcmp(c, "scan"))   { cfg.scan = (a && a[0] == '0') ? 0 : 1; upf("scan=%d\r\n", cfg.scan); }
     else if (!strcmp(c, "ef"))     { HAL_GPIO_WritePin(EF_PORT, EF_PIN, (a && a[0] == '0') ? GPIO_PIN_RESET : GPIO_PIN_SET); up("ok\r\n"); }
     else if (!strcmp(c, "bb"))     { bb_enable(!a || a[0] != '0'); upf("bb=%d\r\n", bb_on); }
+    else if (!strcmp(c, "adc"))    {   /* adc [N] — измерить НАПРЯЖЕНИЕ на линии через PA0 (A0).
+                                          Отвечает на вопрос из даташита: садится ли ноль
+                                          ниже VIL = 0.7 В. Провод: точка замера -> A0. */
+        int n = a ? atoi(a) : 4000;
+        if (n < 100) n = 100;
+        if (n > 20000) n = 20000;
+        __HAL_RCC_ADC1_CLK_ENABLE();
+        GPIO_InitTypeDef g = {0};
+        g.Mode = GPIO_MODE_ANALOG; g.Pull = GPIO_NOPULL; g.Pin = GPIO_PIN_0;
+        HAL_GPIO_Init(GPIOA, &g);
+        ADC1->CR2 = 0; ADC1->SQR3 = 0;              /* канал 0 = PA0 */
+        ADC1->SMPR2 = 0;                            /* 3 такта — самая быстрая выборка */
+        ADC1->CR2 |= ADC_CR2_ADON;
+        udelay(10);
+        uint32_t mn = 4095, mx = 0, sum = 0;
+        uint32_t hist_lo = 0;                       /* сколько отсчётов ниже 0.7 В */
+        for (int i = 0; i < n; i++) {
+            ADC1->CR2 |= ADC_CR2_SWSTART;
+            while (!(ADC1->SR & ADC_SR_EOC)) { }
+            uint32_t v = ADC1->DR & 0xFFF;
+            if (v < mn) mn = v;
+            if (v > mx) mx = v;
+            sum += v;
+            if (v * 3300U / 4095U < 700U) hist_lo++;
+        }
+        upf("АЦП на A0, %d отсчётов: мин %lu мВ, сред %lu мВ, макс %lu мВ\r\n", n,
+            (unsigned long)(mn * 3300U / 4095U), (unsigned long)((sum / n) * 3300U / 4095U),
+            (unsigned long)(mx * 3300U / 4095U));
+        upf("ниже VIL 0.7 В: %lu%% отсчётов (норма даташита VIL <= 0.7 В)\r\n",
+            (unsigned long)(hist_lo * 100U / n));
+    }
     else if (!strcmp(c, "sq"))     {   /* sq [мс] — меандр на PA7 обычным GPIO, 2 кГц.
                                           Проверяет: (1) щуп реально на PA7,
                                           (2) умеет ли нога тянуть вниз быстро. */
