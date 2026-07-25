@@ -417,7 +417,9 @@ static void fb_cube(float a)
         fb_line(px[E[i][0]], py[E[i][0]], px[E[i][1]], py[E[i][1]]);
 }
 
-static uint8_t anim = 0;              /* 0 = статика, 1 = куб */
+static uint8_t anim = 0;              /* 0 = статика, 1 = куб, 2 = лого */
+static uint8_t demo_on = 1;           /* 1 = сам чередует куб и лого по 15 с */
+#define DEMO_MS 15000U
 
 static void fb_checker(int sz)
 {
@@ -450,6 +452,29 @@ static void fb_char(int x, int y, char c)
         for (int row = 0; row < 7; row++) fb_set(x + col, y + row, (cd >> (6 - row)) & 1);
     }
 }
+/* Символ и строка в ориентации стенда: (x, y) — ВИДИМАЯ позиция.
+   Этот дисплей переворачивает кадр по вертикали, поэтому пишем с flip по Y,
+   а горизонталь оставляем как есть. */
+static void fb_char180(int x, int y, char c)
+{
+    int idx = -1;
+    if (c == ' ') idx = 0;
+    else if (c >= '0' && c <= '9') idx = 1 + (c - '0');
+    else if (c >= 'A' && c <= 'Z') idx = 11 + (c - 'A');
+    else if (c >= 'a' && c <= 'z') idx = 11 + (c - 'a');
+    if (idx < 0) return;
+    for (int col = 0; col < 5; col++) {
+        uint8_t cd = FONT5x7[idx][col];
+        for (int row = 0; row < 7; row++)
+            if ((cd >> (6 - row)) & 1) fb_set(x + col, 31 - (y + row), 1);
+    }
+}
+
+static void fb_str180(int x, int y, const char *t)
+{
+    while (*t) { fb_char180(x, y, *t++); x += 6; }
+}
+
 static void fb_str(int x, int y, const char *s) { while (*s) { fb_char(x, y, *s++); x += 6; } }
 
 /* ---------- сборка слотов сдвигового регистра ---------- */
@@ -891,6 +916,20 @@ static void print_st(void)
 
 static void handle(char *line)
 {
+    /* Текст с пробелами разбираем до strtok: "t1 привет мир" -> строка 1.
+       t1..t4 — номер строки (шрифт 5x7, 4 строки по 21 символу), cls — очистить. */
+    if ((line[0] == 't' || line[0] == 'T') && line[1] >= '1' && line[1] <= '4' &&
+        (line[2] == ' ' || line[2] == 0)) {
+        int row = line[1] - '1';
+        const char *txt = (line[2] == 0) ? "" : line + 3;
+        anim = 0; demo_on = 0;
+        for (int y = row * 8; y < row * 8 + 8; y++)        /* чистим только свою строку */
+            for (int x = 0; x < 128; x++) fb_set(x, 31 - y, 0);
+        fb_str180(1, row * 8, txt);
+        upf("строка %d: %s\r\n", row + 1, txt);
+        return;
+    }
+    if (!strncmp(line, "cls", 3)) { anim = 0; demo_on = 0; fb_clear(); up("очищено\r\n"); return; }
     char *c = strtok(line, " ");
     if (!c) return;
     char *a = strtok(NULL, " "), *b = strtok(NULL, " "), *d = strtok(NULL, " ");
@@ -902,6 +941,7 @@ static void handle(char *line)
     else if (!strcmp(c, "hline"))  { if (a) { fb_clear(); fb_hline(atoi(a)); up("ok\r\n"); } }
     else if (!strcmp(c, "vline"))  { if (a) { fb_clear(); fb_vline(atoi(a)); up("ok\r\n"); } }
     else if (!strcmp(c, "logo"))   {   /* logo — по центру, logo m — плавает по полю */
+        demo_on = 0;
         if (a && a[0] == 'm') { anim = 2; up("лого плавает\r\n"); }
         else { anim = 0; fb_logo(); up("логотип Wiren Board\r\n"); }
     }
@@ -909,9 +949,11 @@ static void handle(char *line)
         if (a) cube_scale = (float)atoi(a);
         anim = 1; up("куб пошёл\r\n");
     }
+    else if (!strcmp(c, "demo"))   { demo_on = (a && a[0] == '0') ? 0 : 1;
+                                     upf("демо=%d (куб и лого по 15 с)\r\n", demo_on); }
     else if (!strcmp(c, "walk"))   { cube_walk = (a && a[0] == '0') ? 0 : 1;
                                      upf("блуждание=%d\r\n", cube_walk); }
-    else if (!strcmp(c, "stop"))   { anim = 0; up("анимация стоп\r\n"); }
+    else if (!strcmp(c, "stop"))   { anim = 0; demo_on = 0; up("анимация стоп\r\n"); }
     else if (!strcmp(c, "cross"))  { fb_clear(); fb_hline(8); fb_vline(30); up("ok\r\n"); }
     else if (!strcmp(c, "rect"))   {   /* rect X Y W H — залитый прямоугольник */
         char *e = strtok(NULL, " ");
@@ -1089,9 +1131,10 @@ int main(void)
     SPI1_Init();
     USART2_Init();
 
-    fb_clear();
-    fb_border();
-    fb_str(34, 12, "VFD TEST");
+    /* стартовая рабочая точка стенда: SPI 12.5 МГц, кадр 10 мс = 100 Гц */
+    cfg.mode = 0; cfg.mir = 0; cfg.miry = 0;
+    cfg.on_us = 180; cfg.slotus = 227;
+    fb_logo();
 
     up("\r\nMN12832L datasheet-driver, 44 slots/pair-overlap, abc/def\r\n");
     print_st();
@@ -1100,6 +1143,14 @@ int main(void)
     char line[80]; int li = 0; uint8_t ch;
     uint32_t t_anim = 0;
     while (1) {
+        if (demo_on) {                                /* демо: 15 с куб, 15 с лого */
+            static uint32_t t_scene = 0;
+            if (t_scene == 0) { t_scene = HAL_GetTick(); anim = 1; }
+            if (HAL_GetTick() - t_scene >= DEMO_MS) {
+                t_scene = HAL_GetTick();
+                anim = (anim == 1) ? 2 : 1;
+            }
+        }
         if (anim && HAL_GetTick() - t_anim >= 40) {   /* 25 кадров в секунду */
             t_anim = HAL_GetTick();
             if (anim == 2) { logo_move(); fb_logo_at((int)logo_x, (int)logo_y); }
@@ -1109,8 +1160,9 @@ int main(void)
         scan_frame();
         while (rx_get(&ch)) {
             if (ch == '\r' || ch == '\n') { if (li) { line[li] = 0; handle(line); li = 0; } up("> "); }
-            else if (ch == 8 || ch == 127) { if (li) li--; }
-            else if (li < 79) line[li++] = (char)ch;
+            else if (ch == 8 || ch == 127) { if (li) { li--; up("\b \b"); } }
+            else if (li < 79) { line[li++] = (char)ch;
+                                HAL_UART_Transmit(&huart2, &ch, 1, 100); }
         }
     }
 }
