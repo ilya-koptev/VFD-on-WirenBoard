@@ -1,0 +1,19 @@
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# IDE
+.vscode/
+.idea/
+
+# Сборка
+*.elf
+*.bin
+*.hex
+*.map
+
+# Снимки со стенда (камера) и временные файлы
+*.png
+*.jpg
+__pycache__/
