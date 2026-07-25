@@ -27,6 +27,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <math.h>
+#include "logo.h"
 
 #define LAT_PORT GPIOB
 #define LAT_PIN  GPIO_PIN_6
@@ -302,6 +304,86 @@ static void fb_rect(int x, int y, int w, int h, int on)
     for (int dy = 0; dy < h; dy++)
         for (int dx = 0; dx < w; dx++) fb_set(x + dx, y + dy, on);
 }
+/* Линия по Брезенхэму — нужна для каркасной графики */
+static void fb_line(int x0, int y0, int x1, int y1)
+{
+    int dx = abs(x1 - x0), dy = -abs(y1 - y0);
+    int sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1, err = dx + dy;
+    for (;;) {
+        fb_set(x0, y0, 1);
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+}
+
+/* Логотип Wiren Board во весь экран (данные в logo.h) */
+static void fb_logo(void)
+{
+    for (int y = 0; y < 32; y++)
+        for (int x = 0; x < 128; x++)
+            fb_set(x, y, (LOGO[y][x >> 3] >> (7 - (x & 7))) & 1);
+}
+
+/* Вращающийся куб: 8 вершин, 12 рёбер, поворот вокруг двух осей,
+   перспективная проекция. У F411 есть FPU, так что считаем во float. */
+static float cube_ang = 0.0f;
+static float cube_cx = 64.0f, cube_cy = 16.0f;   /* центр куба плавает */
+static float cube_vx = 0.7f,  cube_vy = 0.35f;
+static uint32_t cube_rnd = 0x1234567U;
+static uint8_t cube_walk = 1;                    /* 1 = блуждать по полю */
+
+static uint32_t xrand(void)   /* простой генератор, без библиотек */
+{
+    cube_rnd ^= cube_rnd << 13; cube_rnd ^= cube_rnd >> 17; cube_rnd ^= cube_rnd << 5;
+    return cube_rnd;
+}
+
+static void cube_move(void)
+{
+    if (!cube_walk) { cube_cx = 64.0f; cube_cy = 16.0f; return; }
+    /* случайный толчок, чтобы траектория не была прямой */
+    cube_vx += ((int)(xrand() % 200) - 100) / 900.0f;
+    cube_vy += ((int)(xrand() % 200) - 100) / 1400.0f;
+    if (cube_vx >  1.4f) cube_vx =  1.4f;
+    if (cube_vx < -1.4f) cube_vx = -1.4f;
+    if (cube_vy >  0.7f) cube_vy =  0.7f;
+    if (cube_vy < -0.7f) cube_vy = -0.7f;
+    cube_cx += cube_vx; cube_cy += cube_vy;
+    /* отражение от краёв: куб может немного вылезать за поле */
+    if (cube_cx < 12.0f)  { cube_cx = 12.0f;  cube_vx = -cube_vx; }
+    if (cube_cx > 116.0f) { cube_cx = 116.0f; cube_vx = -cube_vx; }
+    if (cube_cy < 4.0f)   { cube_cy = 4.0f;   cube_vy = -cube_vy; }
+    if (cube_cy > 28.0f)  { cube_cy = 28.0f;  cube_vy = -cube_vy; }
+}
+static float cube_scale = 17.0f;      /* немного вылезает за края по краям поворота */
+
+static void fb_cube(float a)
+{
+    static const signed char V[8][3] = {
+        {-1,-1,-1},{1,-1,-1},{1,1,-1},{-1,1,-1},{-1,-1,1},{1,-1,1},{1,1,1},{-1,1,1} };
+    static const unsigned char E[12][2] = {
+        {0,1},{1,2},{2,3},{3,0},{4,5},{5,6},{6,7},{7,4},{0,4},{1,5},{2,6},{3,7} };
+    float ca = cosf(a), sa = sinf(a), cb = cosf(a * 0.61f), sb = sinf(a * 0.61f);
+    int px[8], py[8];
+    for (int i = 0; i < 8; i++) {
+        float x = V[i][0], y = V[i][1], z = V[i][2];
+        float x1 =  x * ca + z * sa;          /* поворот вокруг Y */
+        float z1 = -x * sa + z * ca;
+        float y1 =  y * cb - z1 * sb;         /* поворот вокруг X */
+        float z2 =  y * sb + z1 * cb;
+        float k  = 3.0f / (3.6f + z2);        /* перспектива */
+        px[i] = (int)(cube_cx + x1 * k * cube_scale);
+        py[i] = (int)(cube_cy + y1 * k * cube_scale);
+    }
+    fb_clear();
+    for (int i = 0; i < 12; i++)
+        fb_line(px[E[i][0]], py[E[i][0]], px[E[i][1]], py[E[i][1]]);
+}
+
+static uint8_t anim = 0;              /* 0 = статика, 1 = куб */
+
 static void fb_checker(int sz)
 {
     for (int y = 0; y < 32; y++)
@@ -784,6 +866,14 @@ static void handle(char *line)
     else if (!strcmp(c, "chk"))    { fb_clear(); fb_checker(a ? atoi(a) : 4); up("ok\r\n"); }
     else if (!strcmp(c, "hline"))  { if (a) { fb_clear(); fb_hline(atoi(a)); up("ok\r\n"); } }
     else if (!strcmp(c, "vline"))  { if (a) { fb_clear(); fb_vline(atoi(a)); up("ok\r\n"); } }
+    else if (!strcmp(c, "logo"))   { anim = 0; fb_logo(); up("логотип Wiren Board\r\n"); }
+    else if (!strcmp(c, "cube"))   {   /* cube [масштаб] — вращающийся куб */
+        if (a) cube_scale = (float)atoi(a);
+        anim = 1; up("куб пошёл\r\n");
+    }
+    else if (!strcmp(c, "walk"))   { cube_walk = (a && a[0] == '0') ? 0 : 1;
+                                     upf("блуждание=%d\r\n", cube_walk); }
+    else if (!strcmp(c, "stop"))   { anim = 0; up("анимация стоп\r\n"); }
     else if (!strcmp(c, "cross"))  { fb_clear(); fb_hline(8); fb_vline(30); up("ok\r\n"); }
     else if (!strcmp(c, "rect"))   {   /* rect X Y W H — залитый прямоугольник */
         char *e = strtok(NULL, " ");
@@ -970,7 +1060,14 @@ int main(void)
     up("> ");
 
     char line[80]; int li = 0; uint8_t ch;
+    uint32_t t_anim = 0;
     while (1) {
+        if (anim && HAL_GetTick() - t_anim >= 40) {   /* 25 кадров в секунду */
+            t_anim = HAL_GetTick();
+            cube_ang += 0.10f;
+            cube_move();
+            fb_cube(cube_ang);
+        }
         if (dirty) rebuild();
         scan_frame();
         while (rx_get(&ch)) {
