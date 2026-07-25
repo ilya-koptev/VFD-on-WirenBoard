@@ -89,7 +89,10 @@ static struct {
     uint16_t slotus; /* ФИКСИРОВАННЫЙ период слота, мкс (0 = как получится).
                         Выравнивает кадр: убирает дрожание от прерываний и от
                         разной длины кода в слотах. Даташит: слот ~100 мкс.     */
-} cfg = { 44, 1, 1, 0, 0, 1, 1, 0, 30, 0, 1, 0, 12, -1, -1, 1, 0, 0, 0, 0, 6, 0, 1, 1, 2, 0 };
+    uint16_t clkns;  /* длительность полки такта, нс (даташит: >=200, период >=400) */
+    uint8_t  revrow; /* 1 = реверс шести бит внутри строки: afbecd -> dcebfa
+                        (так у mariosgit; у нас проверяем оба варианта)          */
+} cfg = { 44, 1, 1, 0, 0, 1, 1, 0, 30, 0, 1, 0, 12, -1, -1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 2, 0, 250, 0 };
 
 /* Роли LAT/BLK можно менять в рантайме: подписи на разъёме могут не совпадать с реальностью */
 static uint16_t pin_lat = LAT_PIN, pin_blk = BLK_PIN;
@@ -148,6 +151,13 @@ static void udelay(uint32_t us)
     while ((DWT->CYCCNT - start) < ticks) { }
 }
 
+/* Подождать N тактов процессора (для полок такта короче микросекунды) */
+static inline void cyc_wait(uint32_t cycles)
+{
+    uint32_t t0 = DWT->CYCCNT;
+    while ((DWT->CYCCNT - t0) < cycles) { }
+}
+
 /* Догнать фиксированный период слота: убирает дрожание кадра */
 static void slot_wait(uint32_t t0)
 {
@@ -157,6 +167,43 @@ static void slot_wait(uint32_t t0)
 }
 
 static void Error_Handler(void) { while (1) { } }
+
+/* Разгон ядра: HSI 16 МГц -> PLL -> 100 МГц. Нужен, чтобы битбенг успевал
+   выдавать бит за ~0.9 мкс (кадр 44 слота x 240 бит < 10 мс = 100 Гц).
+   APB2 = 100 МГц, APB1 = 50 МГц, флеш 3 такта ожидания. */
+static void SystemClock_Config(void)
+{
+    RCC_OscInitTypeDef osc = {0};
+    RCC_ClkInitTypeDef clk = {0};
+
+    __HAL_RCC_PWR_CLK_ENABLE();
+    __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+
+    /* Без кэша инструкций и предвыборки на 3 тактах ожидания флеша тесный цикл
+       битбенга тормозит в разы — это и съедало разгон. */
+    __HAL_FLASH_INSTRUCTION_CACHE_ENABLE();
+    __HAL_FLASH_DATA_CACHE_ENABLE();
+    __HAL_FLASH_PREFETCH_BUFFER_ENABLE();
+
+    osc.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+    osc.HSIState = RCC_HSI_ON;
+    osc.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+    osc.PLL.PLLState = RCC_PLL_ON;
+    osc.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+    osc.PLL.PLLM = 16;      /* 16 МГц / 16 = 1 МГц на входе VCO */
+    osc.PLL.PLLN = 400;     /* VCO = 400 МГц                     */
+    osc.PLL.PLLP = RCC_PLLP_DIV4;   /* SYSCLK = 100 МГц          */
+    osc.PLL.PLLQ = 8;
+    if (HAL_RCC_OscConfig(&osc) != HAL_OK) Error_Handler();
+
+    clk.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
+                    RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+    clk.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+    clk.AHBCLKDivider = RCC_SYSCLK_DIV1;
+    clk.APB1CLKDivider = RCC_HCLK_DIV2;
+    clk.APB2CLKDivider = RCC_HCLK_DIV1;
+    if (HAL_RCC_ClockConfig(&clk, FLASH_LATENCY_3) != HAL_OK) Error_Handler();
+}
 
 /* ---------- инициализация периферии ---------- */
 static void GPIO_Init(void)
@@ -328,7 +375,8 @@ static void build_slot(int k)
                 if (x >= 128) continue;
                 int xx = cfg.mir  ? (127 - x)   : x;
                 int yy = cfg.miry ? (31 - row)  : row;
-                if (fb_get(xx, yy)) reg_bit(buf, row * 6 + off[i] + 1, cfg.bytes);
+                int slot = cfg.revrow ? (5 - off[i]) : off[i];   /* afbecd -> dcebfa */
+                if (fb_get(xx, yy)) reg_bit(buf, row * 6 + slot + 1, cfg.bytes);
             }
         }
     }
@@ -386,24 +434,34 @@ static void bb_send(const uint8_t *buf, int nbits)
     uint32_t st_ctrl = SysTick->CTRL;
     SysTick->CTRL &= ~SysTick_CTRL_TICKINT_Msk;
 
+    /* Полки такта задаём в ТАКТАХ ПРОЦЕССОРА, а не в nop'ах: ядро теперь 100 МГц,
+       и nop'ы дали бы 40 нс вместо даташитных 200 нс. cfg.clkns — длительность
+       каждой полки в наносекундах (по умолчанию 250 нс -> период 500 нс). */
+    /* Всё, что можно, выносим ИЗ цикла: на 100 МГц каждое обращение к полям
+       конфига и индексация массивов стоили ~1.7 мкс на бит — больше самих полок. */
+    const uint32_t mhz = SystemCoreClock / 1000000U;
+    uint32_t half = mhz * cfg.clkns / 1000U;
+    if (half < 2) half = 2;
+    const uint32_t setc = cfg.setus ? cfg.setus * mhz : half;
+    const uint32_t holdc = half / 4 + 2;                  /* SIN hold >= 50 нс */
+    const uint32_t bbc = cfg.bbdly ? cfg.bbdly * mhz : 0;
+    const uint8_t rtz = cfg.rtz;
+
+    GPIO_TypeDef *const dp = BBPORT[r_dat];
+    GPIO_TypeDef *const cp = BBPORT[r_clk];
+    const uint32_t dset = BBPIN[r_dat], dclr = (uint32_t)BBPIN[r_dat] << 16;
+    const uint32_t cset = BBPIN[r_clk], cclr = (uint32_t)BBPIN[r_clk] << 16;
+
     for (int i = 0; i < nbits; i++) {
-        /* Тайминги даташита при 16 МГц: 1 такт CPU = 62.5 нс.
-           SIN setup >= 40 нс (1 nop), CLK high/low >= 200 нс (4 nop = 250 нс),
-           период >= 400 нс. Держим минимум, чтобы кадр укладывался в 10 мс. */
-        bb_set(r_dat, (buf[i >> 3] >> (7 - (i & 7))) & 1);
-        /* Время установки данных. Даташит требует 40 нс, но на дюпонах линия
-           возвращается в ноль медленно, и фронт CLK наводкой подкидывает её
-           обратно выше порога — модуль читает лишние единицы. Даём линии
-           устояться ДО фронта. */
-        if (cfg.setus) udelay(cfg.setus);
-        else __asm volatile("nop");
-        bb_set(r_clk, 1);
-        __asm volatile("nop; nop; nop; nop");
-        bb_set(r_clk, 0);
-        __asm volatile("nop; nop");       /* SIN hold >= 50 нс ПОСЛЕ спада CLK */
-        if (cfg.rtz) bb_set(r_dat, 0);    /* дальше пусть линия падает весь остаток бита */
-        __asm volatile("nop; nop");
-        if (cfg.bbdly) udelay(cfg.bbdly);
+        dp->BSRR = ((buf[i >> 3] >> (7 - (i & 7))) & 1) ? dset : dclr;
+        cyc_wait(setc);                   /* данные до фронта: >= 40 нс по даташиту */
+        cp->BSRR = cset;
+        cyc_wait(half);                   /* CLK high >= 200 нс */
+        cp->BSRR = cclr;
+        cyc_wait(holdc);
+        if (rtz) dp->BSRR = dclr;         /* дальше линия падает весь остаток бита */
+        cyc_wait(half);                   /* CLK low >= 200 нс */
+        if (bbc) cyc_wait(bbc);
     }
 
     SysTick->CTRL = st_ctrl;
@@ -619,7 +677,7 @@ static void so_test(int nclk)
    Гоним известный паттерн, потом вычитываем поток с SO1, гоня нули.
    Смещение, на котором паттерн вылезает, = длина цепи; побитное совпадение
    = данные доходят без потерь на текущей скорости такта (cfg bbdly). */
-static void so_read(int nbits)
+static void so_read(int nbits, int write_spi)
 {
     static uint8_t cap[80];
     static const uint8_t pat[30] = {
@@ -628,14 +686,22 @@ static void so_read(int nbits)
         0x9A, 0xBC, 0xDE, 0xF0, 0xAA, 0x55, 0xC3, 0x3C, 0x69, 0x96 };
     static const uint8_t zer[30] = {0};
 
-    if (!bb_on) bb_enable(1);
-    blk_blank();                                   /* скан стоит -> BLK в гашение */
-
     /* если поток собран вручную (rz/rb), гоняем его — удобно для точечных тестов */
     const uint8_t *src = raw.manual ? rawbuf : pat;
 
-    bb_send(zer, 240); bb_send(zer, 240);          /* промыть цепь нулями */
-    bb_send(src, 240);                             /* известный паттерн */
+    if (write_spi) {          /* пишем аппаратным SPI, читаем всё равно битбенгом */
+        if (bb_on) bb_enable(0);
+        blk_blank();
+        HAL_SPI_Transmit(&hspi1, (uint8_t *)zer, 30, 100);
+        HAL_SPI_Transmit(&hspi1, (uint8_t *)zer, 30, 100);
+        HAL_SPI_Transmit(&hspi1, (uint8_t *)src, 30, 100);
+        bb_enable(1);
+    } else {
+        if (!bb_on) bb_enable(1);
+        blk_blank();                               /* скан стоит -> BLK в гашение */
+        bb_send(zer, 240); bb_send(zer, 240);      /* промыть цепь нулями */
+        bb_send(src, 240);                         /* известный паттерн */
+    }
 
     if (nbits > (int)sizeof(cap) * 8) nbits = sizeof(cap) * 8;
     memset(cap, 0, sizeof cap);
@@ -690,6 +756,8 @@ static void cfg_set(const char *k, int v)
     else if (!strcmp(k, "rtz"))    cfg.rtz    = (uint8_t)v;
     else if (!strcmp(k, "rddly"))  cfg.rddly  = (uint16_t)v;
     else if (!strcmp(k, "setus"))  cfg.setus  = (uint16_t)v;
+    else if (!strcmp(k, "clkns"))  cfg.clkns  = (uint16_t)v;
+    else if (!strcmp(k, "revrow")) cfg.revrow = (uint8_t)v;
     else { up("cfg? \r\n"); return; }
     dirty = 1;
     upf("cfg %s=%d\r\n", k, v);
@@ -744,6 +812,37 @@ static void handle(char *line)
     else if (!strcmp(c, "scan"))   { cfg.scan = (a && a[0] == '0') ? 0 : 1; upf("scan=%d\r\n", cfg.scan); }
     else if (!strcmp(c, "ef"))     { HAL_GPIO_WritePin(EF_PORT, EF_PIN, (a && a[0] == '0') ? GPIO_PIN_RESET : GPIO_PIN_SET); up("ok\r\n"); }
     else if (!strcmp(c, "bb"))     { bb_enable(!a || a[0] != '0'); upf("bb=%d\r\n", bb_on); }
+    else if (!strcmp(c, "sq"))     {   /* sq [мс] — меандр на PA7 обычным GPIO, 2 кГц.
+                                          Проверяет: (1) щуп реально на PA7,
+                                          (2) умеет ли нога тянуть вниз быстро. */
+        int ms = a ? atoi(a) : 300;
+        HAL_SPI_DeInit(&hspi1);
+        GPIO_InitTypeDef g = {0};
+        g.Mode = GPIO_MODE_OUTPUT_PP; g.Pull = GPIO_NOPULL;
+        g.Speed = GPIO_SPEED_FREQ_VERY_HIGH; g.Pin = GPIO_PIN_7;
+        HAL_GPIO_Init(GPIOA, &g);
+        uint32_t t0 = HAL_GetTick();
+        while (HAL_GetTick() - t0 < (uint32_t)ms) {
+            GPIOA->BSRR = GPIO_PIN_7;        udelay(250);
+            GPIOA->BSRR = (uint32_t)GPIO_PIN_7 << 16; udelay(250);
+        }
+        GPIOA->BSRR = (uint32_t)GPIO_PIN_7 << 16;
+        SPI1_Init();
+        upf("меандр 2 кГц на PA7 %d мс, потом SPI обратно\r\n", ms);
+    }
+    else if (!strcmp(c, "spd"))    {   /* spd N — делитель SPI (APB2 = 100 МГц): 8 -> 12.5 МГц */
+        int n = a ? atoi(a) : 8;
+        static const struct { int div; uint32_t presc; } tab[] = {
+            {2, SPI_BAUDRATEPRESCALER_2}, {4, SPI_BAUDRATEPRESCALER_4},
+            {8, SPI_BAUDRATEPRESCALER_8}, {16, SPI_BAUDRATEPRESCALER_16},
+            {32, SPI_BAUDRATEPRESCALER_32}, {64, SPI_BAUDRATEPRESCALER_64},
+            {128, SPI_BAUDRATEPRESCALER_128}, {256, SPI_BAUDRATEPRESCALER_256} };
+        for (unsigned i = 0; i < sizeof tab / sizeof tab[0]; i++)
+            if (tab[i].div == n) spi_presc = tab[i].presc;
+        bb_enable(0);                  /* уходим с битбенга на аппаратный SPI */
+        upf("SPI /%d = %lu Гц, bb=%d\r\n", n,
+            (unsigned long)(HAL_RCC_GetPCLK2Freq() / n), bb_on);
+    }
     else if (!strcmp(c, "slew"))   {   /* slew 0..3: 0 = самые медленные фронты */
         static const uint32_t sp[4] = { GPIO_SPEED_FREQ_LOW, GPIO_SPEED_FREQ_MEDIUM,
                                         GPIO_SPEED_FREQ_HIGH, GPIO_SPEED_FREQ_VERY_HIGH };
@@ -777,7 +876,9 @@ static void handle(char *line)
         }
     }
     else if (!strcmp(c, "so"))     { so_test(a ? atoi(a) : 600); }
-    else if (!strcmp(c, "sord"))   { so_read(a ? atoi(a) : 560); }
+    else if (!strcmp(c, "sord"))   {   /* sord [бит] [spi] — вторым словом переключаем запись на SPI */
+        so_read(a ? atoi(a) : 560, (b && b[0] == 's') ? 1 : 0);
+    }
     else if (!strcmp(c, "raw"))    {
         if (a) raw.rs = (uint16_t)atoi(a);
         if (b) raw.rn = (uint16_t)atoi(b);
@@ -805,6 +906,13 @@ static void handle(char *line)
     }
     else if (!strcmp(c, "flush"))  { flush_zeros(a ? atoi(a) : 960); up("ok\r\n"); }
     else if (!strcmp(c, "st"))     { print_st(); }
+    else if (!strcmp(c, "clk"))    {   /* какие частоты реально получились */
+        upf("SYSCLK=%lu HCLK=%lu PCLK1=%lu PCLK2=%lu Гц\r\n",
+            (unsigned long)HAL_RCC_GetSysClockFreq(), (unsigned long)HAL_RCC_GetHCLKFreq(),
+            (unsigned long)HAL_RCC_GetPCLK1Freq(), (unsigned long)HAL_RCC_GetPCLK2Freq());
+        upf("SystemCoreClock=%lu, флеш latency=%lu\r\n",
+            (unsigned long)SystemCoreClock, (unsigned long)(FLASH->ACR & FLASH_ACR_LATENCY));
+    }
     else if (!strcmp(c, "help"))   {
         up("clr fill border chk N hline Y vline X cross px X Y V one X Y str X TXT text\r\n"
            "cfg [k v] | k: slots gstep dbl triad par mir rev bytes dup mode on blk\r\n"
@@ -816,6 +924,7 @@ static void handle(char *line)
 int main(void)
 {
     HAL_Init();
+    SystemClock_Config();       /* 100 МГц: без этого битбенг не выдаёт 100 Гц кадра */
     dwt_init();
     GPIO_Init();
     SPI1_Init();
