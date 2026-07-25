@@ -79,10 +79,17 @@ static struct {
     uint8_t  nolat;  /* 1 = не дёргать LAT вообще                                 */
     uint8_t  gcp;    /* сколько импульсов GCP выдавать за слот (даташит: 5-6)      */
     uint16_t bbdly;  /* доп. задержка на бит в битбенге, мкс (замедление CLK)      */
+    uint8_t  rtz;    /* 1 = return-to-zero: сразу после такта гасим линию данных.
+                        Даташит требует VIL <= 0.7 В — жёстко; если земля/линия
+                        подсаживают ноль, единица «протягивается» в следующие
+                        разряды. RTZ даёт линии почти весь бит на спад.        */
+    uint16_t setus;  /* время установки данных до фронта CLK, мкс (0 = ~60 нс)     */
+    uint16_t rddly;  /* задержка фазы такта при ЧТЕНИИ через SO1, мкс (для sord):
+                        позволяет отделить смаз записи от медленного спада SO1 */
     uint16_t slotus; /* ФИКСИРОВАННЫЙ период слота, мкс (0 = как получится).
                         Выравнивает кадр: убирает дрожание от прерываний и от
                         разной длины кода в слотах. Даташит: слот ~100 мкс.     */
-} cfg = { 44, 1, 1, 0, 0, 1, 1, 0, 30, 0, 1, 0, 12, -1, -1, 1, 0, 0, 0, 0, 6, 0, 0 };
+} cfg = { 44, 1, 1, 0, 0, 1, 1, 0, 30, 0, 1, 0, 12, -1, -1, 1, 0, 0, 0, 0, 6, 0, 1, 1, 2, 0 };
 
 /* Роли LAT/BLK можно менять в рантайме: подписи на разъёме могут не совпадать с реальностью */
 static uint16_t pin_lat = LAT_PIN, pin_blk = BLK_PIN;
@@ -352,12 +359,16 @@ static inline void bb_set(uint8_t i, int v)
     BBPORT[i]->BSRR = v ? BBPIN[i] : (uint32_t)BBPIN[i] << 16;
 }
 
+/* Крутизна фронтов на 4 линиях. Медленные фронты = меньше звона и наводки
+   CLK -> SIN на дюпонах; проверяем, не из-за них ли единица «протягивается». */
+static uint32_t bb_slew = GPIO_SPEED_FREQ_VERY_HIGH;
+
 static void bb_enable(int on)
 {
     GPIO_InitTypeDef g = {0};
     if (on) {
         HAL_SPI_DeInit(&hspi1);
-        g.Mode = GPIO_MODE_OUTPUT_PP; g.Pull = GPIO_NOPULL; g.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+        g.Mode = GPIO_MODE_OUTPUT_PP; g.Pull = GPIO_NOPULL; g.Speed = bb_slew;
         g.Pin = GPIO_PIN_5 | GPIO_PIN_7; HAL_GPIO_Init(GPIOA, &g);
         g.Pin = GPIO_PIN_6 | GPIO_PIN_4; HAL_GPIO_Init(GPIOB, &g);
         bb_set(r_clk, 0);
@@ -369,18 +380,33 @@ static void bb_enable(int on)
 
 static void bb_send(const uint8_t *buf, int nbits)
 {
+    /* SysTick (1 кГц) влезал в середину сдвига и растягивал такт — от кадра к кадру
+       менялось, какие биты защёлкнутся, отсюда дрожание картинки. Глушим только его,
+       USART оставляем живым, чтобы не терять символы консоли. */
+    uint32_t st_ctrl = SysTick->CTRL;
+    SysTick->CTRL &= ~SysTick_CTRL_TICKINT_Msk;
+
     for (int i = 0; i < nbits; i++) {
         /* Тайминги даташита при 16 МГц: 1 такт CPU = 62.5 нс.
            SIN setup >= 40 нс (1 nop), CLK high/low >= 200 нс (4 nop = 250 нс),
            период >= 400 нс. Держим минимум, чтобы кадр укладывался в 10 мс. */
         bb_set(r_dat, (buf[i >> 3] >> (7 - (i & 7))) & 1);
-        __asm volatile("nop");
+        /* Время установки данных. Даташит требует 40 нс, но на дюпонах линия
+           возвращается в ноль медленно, и фронт CLK наводкой подкидывает её
+           обратно выше порога — модуль читает лишние единицы. Даём линии
+           устояться ДО фронта. */
+        if (cfg.setus) udelay(cfg.setus);
+        else __asm volatile("nop");
         bb_set(r_clk, 1);
         __asm volatile("nop; nop; nop; nop");
         bb_set(r_clk, 0);
-        __asm volatile("nop; nop; nop; nop");
+        __asm volatile("nop; nop");       /* SIN hold >= 50 нс ПОСЛЕ спада CLK */
+        if (cfg.rtz) bb_set(r_dat, 0);    /* дальше пусть линия падает весь остаток бита */
+        __asm volatile("nop; nop");
         if (cfg.bbdly) udelay(cfg.bbdly);
     }
+
+    SysTick->CTRL = st_ctrl;
 }
 
 /* LAT/BLK: в битбенге — по назначенным ролям, иначе — по подписям разъёма */
@@ -615,13 +641,14 @@ static void so_read(int nbits)
     memset(cap, 0, sizeof cap);
     /* Чтение делаем ЗАВЕДОМО медленно и симметрично (как в so_test, который даёт
        стабильные 240), чтобы мерить именно надёжность ЗАПИСИ на скорости cfg.bbdly. */
+    uint32_t rd = cfg.rddly ? cfg.rddly : 2;
     for (int i = 0; i < nbits; i++) {              /* вычитываем, гоня нули */
         bb_set(r_dat, 0);
-        udelay(2);
+        udelay(rd);
         bb_set(r_clk, 1);
-        udelay(2);
+        udelay(rd);
         bb_set(r_clk, 0);
-        udelay(2);
+        udelay(rd);
         if (HAL_GPIO_ReadPin(SO1_PORT, SO1_PIN)) cap[i >> 3] |= (0x80 >> (i & 7));
     }
 
@@ -660,6 +687,9 @@ static void cfg_set(const char *k, int v)
     else if (!strcmp(k, "gcp"))    cfg.gcp    = (uint8_t)v;
     else if (!strcmp(k, "bbdly"))  cfg.bbdly  = (uint16_t)v;
     else if (!strcmp(k, "slotus")) cfg.slotus = (uint16_t)v;
+    else if (!strcmp(k, "rtz"))    cfg.rtz    = (uint8_t)v;
+    else if (!strcmp(k, "rddly"))  cfg.rddly  = (uint16_t)v;
+    else if (!strcmp(k, "setus"))  cfg.setus  = (uint16_t)v;
     else { up("cfg? \r\n"); return; }
     dirty = 1;
     upf("cfg %s=%d\r\n", k, v);
@@ -714,6 +744,14 @@ static void handle(char *line)
     else if (!strcmp(c, "scan"))   { cfg.scan = (a && a[0] == '0') ? 0 : 1; upf("scan=%d\r\n", cfg.scan); }
     else if (!strcmp(c, "ef"))     { HAL_GPIO_WritePin(EF_PORT, EF_PIN, (a && a[0] == '0') ? GPIO_PIN_RESET : GPIO_PIN_SET); up("ok\r\n"); }
     else if (!strcmp(c, "bb"))     { bb_enable(!a || a[0] != '0'); upf("bb=%d\r\n", bb_on); }
+    else if (!strcmp(c, "slew"))   {   /* slew 0..3: 0 = самые медленные фронты */
+        static const uint32_t sp[4] = { GPIO_SPEED_FREQ_LOW, GPIO_SPEED_FREQ_MEDIUM,
+                                        GPIO_SPEED_FREQ_HIGH, GPIO_SPEED_FREQ_VERY_HIGH };
+        int i = a ? atoi(a) : 3;
+        bb_slew = sp[i & 3];
+        bb_enable(1);
+        upf("slew=%d\r\n", i & 3);
+    }
     else if (!strcmp(c, "perm"))   {   /* perm d c l b — роли по индексам 0=PA5 1=PA7 2=PB6 3=PB4 */
         if (a && strlen(a) >= 4) {
             r_dat = a[0] - '0'; r_clk = a[1] - '0'; r_lat = a[2] - '0'; r_blk = a[3] - '0';
