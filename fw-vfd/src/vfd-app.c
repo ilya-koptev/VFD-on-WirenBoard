@@ -931,27 +931,42 @@ static void line_geom(int ln, int *x, int *y, int *fnt)
    Значение строки читается как число 0..10 и превращается в высоту столбца.
    Обновляется тот столбец, чья строка изменилась: гасим его полосу и рисуем
    заново, соседние не трогаем — та же логика, что у построчного текста. */
-static void eq_update(int ln)
+/* Источники значений: семь строк текста и семь строк параметров — в этом режиме
+   они не размещают текст, а работают столбцами, всего до четырнадцати. */
+#define EQ_SRC (2 * TEXT_LINES)
+
+static const char *eq_src(int i)
 {
-    if (ln < 0 || ln >= EQ_BARS) return;
-    mb_text[ln][TEXT_LEN] = 0;
-
-    int x0 = EQ_X0 + ln * EQ_PITCH;
-    fb_clear_rect(x0, 0, EQ_W, 32);
-
-    int v[1];
-    if (nums_parse(mb_text[ln], v, 1) == 1) {
-        int val = v[0] < 0 ? 0 : (v[0] > EQ_VMAX ? EQ_VMAX : v[0]);
-        int h = (val * 31 + EQ_VMAX / 2) / EQ_VMAX;      /* 0..10 -> 0..31 точек */
-        if (h > 0) fb_box_fill(x0, 0, x0 + EQ_W - 1, h - 1);
-    }
-    dirty = 1;
+    return (i < TEXT_LINES) ? mb_text[i] : mb_params[i - TEXT_LINES];
 }
 
+/* Столбцов на экране столько, в скольких полях введены значения. Ширина считается
+   от их числа, зазор всегда одна точка, всё вместе центруется. Геометрия зависит
+   от числа заполненных полей, поэтому при изменении перерисовываем все столбцы. */
 static void eq_redraw_all(void)
 {
+    int val[EQ_SRC], n = 0;
+
+    for (int i = 0; i < EQ_SRC; i++) {
+        const char *src = eq_src(i);
+        int v[1];
+        if (blank_only(src)) continue;
+        if (nums_parse(src, v, 1) != 1) continue;
+        val[n++] = v[0] < 0 ? 0 : (v[0] > EQ_VMAX ? EQ_VMAX : v[0]);
+    }
+
     fb_clear();
-    for (int ln = 0; ln < EQ_BARS; ln++) eq_update(ln);
+    if (n > 0) {
+        int w = (128 - (n - 1)) / n;
+        if (w < 1) w = 1;
+        int x = (128 - (n * w + n - 1)) / 2;
+        for (int i = 0; i < n; i++) {
+            int h = (val[i] * 31 + EQ_VMAX / 2) / EQ_VMAX;   /* 0..10 -> 0..31 */
+            if (h > 0) fb_box_fill(x, 0, x + w - 1, h - 1);
+            x += w + 1;
+        }
+    }
+    dirty = 1;
 }
 
 static void mb_line_update(int ln)
@@ -1456,7 +1471,7 @@ static void app_loop(void)
         if (mb_text_new && anim == 0) {              /* перерисовать только изменённые строки */
             for (int ln = 0; ln < TEXT_LINES; ln++)
                 if (mb_text_new & (1u << ln)) {
-                    if (eq_on) eq_update(ln);
+                    if (eq_on) eq_redraw_all();      /* геометрия зависит от числа полей */
                     else       mb_line_update(ln);
                 }
             mb_text_new = 0;
