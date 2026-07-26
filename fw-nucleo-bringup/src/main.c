@@ -462,10 +462,11 @@ static void date_next(void)                 /* следующий день, с �
 
 static uint8_t clk_h = 12, clk_m = 0, clk_s = 0;
 static uint32_t clk_tick = 0;               /* метка последней секунды */
+static uint8_t clk_set = 0;                 /* какой набор цифр, см. DIGITS */
 
 static void fb_digits(int x, int y, const char *t)
 {
-    const digits_t *d = &DIGITS[0];
+    const digits_t *d = &DIGITS[clk_set];
     for (; *t && x < 128; t++) {
         int gi = (*t >= '0' && *t <= '9') ? *t - '0' : (*t == ':' ? 10 : 11);
         const uint8_t *g = d->data + (size_t)gi * d->h * d->by;
@@ -486,24 +487,34 @@ static void clock_tick(void)                /* отсчёт секунд */
     }
 }
 
+/* Раскладка зависит от набора цифр. Ноль по Y у этого поля ВНИЗУ.
+   Набор 0 (14x19) — единственный, под которым снизу остаётся место на дату
+   шрифтом 7x13 (19 + 13 = 32 ровно). Остальные наборы выше, поэтому идут без
+   даты и центруются по вертикали; секунды показываем только если строка из
+   восьми знаков влезает в 128 точек (поле secs в наборе). */
 static void clock_draw(void)
 {
-    const digits_t *d = &DIGITS[0];
+    const digits_t *d = &DIGITS[clk_set];
+    const font_t *f = &FONTS[2];
     char buf[16];
     int per = d->w + 1;
-    snprintf(buf, sizeof buf, "%02u:%02u:%02u", clk_h, clk_m, clk_s);
-    int wid = (int)strlen(buf) * per - 1;
-    fb_clear();
-    fb_digits((128 - wid) / 2, 32 - d->h, buf);      /* часы вверху: ноль у этого поля ВНИЗУ */
+    int with_date = (d->h + f->h <= 32);
 
-    /* дата снизу по центру, мелким шрифтом 5x8: "26 июля 2026" */
+    if (d->secs) snprintf(buf, sizeof buf, "%02u:%02u:%02u", clk_h, clk_m, clk_s);
+    else         snprintf(buf, sizeof buf, "%02u:%02u", clk_h, clk_m);
+    int wid = (int)strlen(buf) * per - 1;
+
+    fb_clear();
+    fb_digits((128 - wid) / 2, with_date ? 32 - d->h : (32 - d->h) / 2, buf);
+    if (!with_date) return;
+
+    /* дата по центру снизу, месяц словами: "26 июля" */
     snprintf(buf, sizeof buf, "%u %s", dt_d, MONTHS[(dt_mo - 1) % 12]);
     uint8_t save = font_id;
-    font_id = 2;                                     /* дата крупным 7x13 */
-    const font_t *f = &FONTS[2];
+    font_id = 2;
     int tw = 0;
     for (const char *q = buf; *q; q++) if (((uint8_t)*q & 0xC0) != 0x80) tw += f->w + 1;
-    fb_text((128 - tw) / 2 > 0 ? (128 - tw) / 2 : 0, 0, buf);   /* дата в нулевую строку, то есть снизу */
+    fb_text((128 - tw) / 2 > 0 ? (128 - tw) / 2 : 0, 0, buf);
     font_id = save;
 }
 
@@ -782,9 +793,12 @@ static void handle(char *line)
     else if (!strcmp(c, "clock"))  {   /* clock — часы с датой, clock - выключить */
         if (a && a[0] == '-') { anim = 0; up("часы выключены\r\n"); }
         else {
+            if (a && a[0] >= '0' && a[0] <= '9') clk_set = (uint8_t)(atoi(a) % DIGITS_COUNT);
+            const digits_t *d = &DIGITS[clk_set];
             demo_on = 0; anim = 3; clk_tick = HAL_GetTick();
-            upf("часы %02u:%02u:%02u, дата %u %s %u\r\n", clk_h, clk_m, clk_s,
-                dt_d, MONTHS[(dt_mo - 1) % 12], dt_y);
+            upf("часы %02u:%02u:%02u набором %u %s (%dx%d)%s\r\n", clk_h, clk_m, clk_s,
+                clk_set, d->name, d->w, d->h,
+                (d->h + FONTS[2].h <= 32) ? ", снизу дата" : ", без даты");
         }
     }
     else if (!strcmp(c, "date"))   {   /* date ДД.ММ.ГГГГ */
@@ -859,7 +873,9 @@ static void handle(char *line)
         up("  cls           очистить экран\r\n");
         up("\r\nЧАСЫ\r\n");
         up("  time ЧЧ:ММ:СС выставить время | date ДД.ММ.ГГГГ  выставить дату\r\n");
-        up("  clock         часы крупными цифрами, снизу дата словами\r\n");
+        up("  clock [N]     часы, N = набор цифр 0..3:\r\n");
+        up("                0 = 14x19 с датой снизу, 1 = 13x25 с секундами,\r\n");
+        up("                2 = 17x24 жирные, 3 = 17x29 самые высокие\r\n");
         up("  clock -       выключить часы\r\n");
         up("\r\nКАРТИНКИ И АНИМАЦИЯ\r\n");
         up("  logo          логотип Wiren Board по центру | logo m  плавает по полю\r\n");
