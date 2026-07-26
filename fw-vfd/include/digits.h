@@ -83,5 +83,5 @@ static const digits_t DIGITS[DIGITS_COUNT] = {
     { (const uint8_t *)D_InkyThin, INKYTHIN_W, INKYTHIN_H, INKYTHIN_BY, 1, "InkyThin" },
     { (const uint8_t *)D_KernelNBP, KERNELNBP_W, KERNELNBP_H, KERNELNBP_BY, 1, "KernelNBP" },
     { (const uint8_t *)D_Pixeloza, PIXELOZA_W, PIXELOZA_H, PIXELOZA_BY, 1, "Pixeloza" },
-    { (const uint8_t *)D_Wario, WARIO_W, WARIO_H, WARIO_BY, 0, "Wario" },
+    { (const uint8_t *)D_Wario, WARIO_W, WARIO_H, WARIO_BY, 1, "Wario" },
 };
