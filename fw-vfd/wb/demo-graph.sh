@@ -19,7 +19,7 @@ DEV=${DEV:-vfd}
 PASSES=${1:-3}
 pub() { mosquitto_pub -h localhost -t "/devices/$DEV/controls/$1/on" -m "$2"; }
 
-AX=56; XN=126; STEP=2          # ось и поле графиков по X
+AX=56; XN=126; STEP=1          # ось и поле графиков по X: точки без пробелов
 VMAX=15                        # верх шкалы: 15 единиц = 24 точки по Y
 YTOP=24
 
@@ -89,7 +89,7 @@ while [ "$pass" -lt "$PASSES" ]; do
         pub "Text 1" "$(echo "$V" | tr . ,)"
         pub "Text 2" "$(echo "$A" | tr . ,)"
 
-        sleep 0.5
+        sleep 0.25
         x=$((x + STEP))
         i=$((i + 1))
     done
