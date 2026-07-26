@@ -31,6 +31,8 @@
 #include "logo.h"
 #include "fonts.h"
 #include "digits.h"
+#include "regmap-structs.h"     /* регкарта — общая с загрузчиком и утилитами */
+#include "wbfw.h"               /* стандартные адреса ВБ и протокол обновления */
 
 #define LAT_PORT GPIOB
 #define LAT_PIN  GPIO_PIN_6
@@ -713,6 +715,303 @@ static void print_st(void)
         cfg.slotus, (unsigned)(cfg.slotus * cfg.slots));
 }
 
+/* ---------- состояние, которым управляют и консоль, и шина ---------- */
+static uint8_t  fb_inverted = 0;        /* держим отдельно: по шине это флаг, а не действие */
+static uint8_t  boot_request = 0;       /* просьба уйти в загрузчик, исполняется в цикле */
+static uint16_t mb_unix_hi = 0;         /* старшее слово времени, ждёт младшего */
+
+static void mb_text_redraw(void);       /* определения ниже, у буфера строк */
+static void clk_tick_reset(void);
+
+static void fb_invert_now(void)
+{
+    for (int y = 0; y < 32; y++)
+        for (int i = 0; i < 16; i++) fb[y][i] = (uint8_t)~fb[y][i];
+    dirty = 1;
+}
+
+static void fb_invert_to(int on)
+{
+    if (!!on == !!fb_inverted) return;
+    fb_inverted = on ? 1 : 0;
+    fb_invert_now();
+}
+
+/* Режим из регкарты <-> внутреннее состояние анимации */
+static uint16_t anim_to_mode(void)
+{
+    if (demo_on) return VFD_MODE_DEMO;
+    switch (anim) {
+    case 1:  return VFD_MODE_CUBE;
+    case 2:  return VFD_MODE_LOGO;
+    case 3:  return VFD_MODE_CLOCK;
+    default: return VFD_MODE_TEXT;
+    }
+}
+
+static void mode_apply(uint16_t m)
+{
+    demo_on = 0;
+    switch (m) {
+    case VFD_MODE_BLANK: anim = 0; fb_clear(); dirty = 1; break;
+    case VFD_MODE_TEXT:  anim = 0; mb_text_redraw(); break;
+    case VFD_MODE_CLOCK: anim = 3; clk_tick_reset(); break;
+    case VFD_MODE_LOGO:  anim = 2; break;
+    case VFD_MODE_CUBE:  anim = 1; break;
+    case VFD_MODE_DEMO:  demo_on = 1; anim = 1; break;
+    default: break;
+    }
+}
+
+/* ---------- Modbus RTU: модуль как устройство Wiren Board ----------
+   Живёт на том же UART, что консоль: по USB у стенда только он. Разводятся по
+   первому байту — кадр Modbus начинается с адреса 0x01, а в текстовых командах
+   такого байта не бывает, поэтому одно другому не мешает.
+
+   Регистры и их адреса берутся из общей регкарты fw-vfd/include/regmap-structs.h,
+   стандартные адреса ВБ (129, 131, 250, 290, 330) — из wbfw.h. */
+#define MB_ADDR          1
+#define MB_GAP_MS        4          /* 3.5 символа; на 115200 с запасом */
+#define MB_BUF           300
+
+static uint8_t  mb_buf[MB_BUF];
+static uint16_t mb_len = 0;
+static uint16_t mb_errors = 0;      /* битые кадры, отдаём в STATUS */
+
+/* Конец кадра НЕ по паузе на линии: главный цикл занят выводом кадра дисплея
+   ~10 мс, и байты одного запроса попадают в разные проходы — пауза 3.5 символа
+   «истекала» посреди кадра, остаток уходил в консоль. В Modbus RTU длина кадра
+   однозначно задана функцией, поэтому ждём ровно столько байт, сколько нужно. */
+static uint16_t mb_expected(const uint8_t *d, uint16_t have)
+{
+    if (have < 2) return 8;                     /* пока не знаем функцию */
+    switch (d[1]) {
+    case 0x03: case 0x04: case 0x06: return 8;  /* адрес, функция, регистр, значение, CRC */
+    case 0x10:                                  /* + байт длины и сами данные */
+        if (have < 7) return 9;
+        return (uint16_t)(9 + d[6]);
+    default: return 8;
+    }
+}
+
+static uint16_t mb_crc(const uint8_t *d, int n)
+{
+    uint16_t crc = 0xFFFF;
+    for (int i = 0; i < n; i++) {
+        crc ^= d[i];
+        for (int b = 0; b < 8; b++)
+            crc = (crc & 1) ? (uint16_t)((crc >> 1) ^ 0xA001) : (uint16_t)(crc >> 1);
+    }
+    return crc;
+}
+
+static void mb_reply(uint8_t *d, int n)
+{
+    uint16_t crc = mb_crc(d, n);
+    d[n] = (uint8_t)(crc & 0xFF);
+    d[n + 1] = (uint8_t)(crc >> 8);
+    tx_push((const char *)d, n + 2);
+}
+
+static void mb_exception(uint8_t fn, uint8_t code)
+{
+    uint8_t r[5];
+    r[0] = MB_ADDR; r[1] = (uint8_t)(fn | 0x80); r[2] = code;
+    mb_reply(r, 3);
+}
+
+/* Строки текста живут в своём буфере: контроллер пишет их регистрами, а рисуем
+   мы по своему такту, чтобы не рвать кадр посреди приёма. */
+static char mb_text[TEXT_LINES][TEXT_LEN + 1];
+static uint8_t mb_text_dirty = 0;
+
+static void clk_tick_reset(void) { clk_tick = HAL_GetTick(); }
+
+/* Строки рисуем сверху вниз выбранным шрифтом. Ноль по Y у поля внизу, поэтому
+   первая строка садится на 32 минус высота шрифта. */
+static void mb_text_redraw(void)
+{
+    const font_t *f = &FONTS[font_id % 3];
+    int step = f->h + 1;
+    fb_clear();
+    for (int ln = 0; ln < TEXT_LINES; ln++) {
+        int y = 32 - step * (ln + 1) + 1;
+        if (y < 0) break;
+        mb_text[ln][TEXT_LEN] = 0;
+        if (mb_text[ln][0]) fb_text(0, y, mb_text[ln]);
+    }
+    if (fb_inverted) fb_invert_now();
+    dirty = 1;
+    mb_text_dirty = 0;
+}
+
+/* Время приходит секундами эпохи, разворачиваем в часы и календарь сами:
+   от контроллера идёт UTC, поэтому смещение зоны храним отдельно. */
+static int16_t mb_tz_min = 0;
+
+static void mb_set_unixtime(uint32_t t)
+{
+    int32_t local = (int32_t)t + (int32_t)mb_tz_min * 60;
+    uint32_t days = (uint32_t)(local / 86400);
+    uint32_t rem = (uint32_t)(local % 86400);
+    clk_h = (uint8_t)(rem / 3600);
+    clk_m = (uint8_t)((rem % 3600) / 60);
+    clk_s = (uint8_t)(rem % 60);
+    clk_tick = HAL_GetTick();
+
+    /* от 1970-01-01 идём годами: диапазон нам нужен бытовой, не астрономический */
+    uint16_t y = 1970;
+    for (;;) {
+        uint16_t len = (uint16_t)(((y % 4 == 0 && y % 100 != 0) || y % 400 == 0) ? 366 : 365);
+        if (days < len) break;
+        days -= len; y++;
+    }
+    uint8_t mo = 1;
+    for (;;) {
+        uint8_t len = MDAYS[mo - 1];
+        if (mo == 2 && ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0)) len = 29;
+        if (days < len) break;
+        days -= len; mo++;
+    }
+    dt_y = y; dt_mo = mo; dt_d = (uint8_t)(days + 1);
+}
+
+static uint16_t mb_read_reg(uint16_t reg)
+{
+    /* стандартные регистры ВБ: по ним инструменты узнают устройство */
+    if (reg >= WBFW_REG_FW_VERSION && reg < WBFW_REG_FW_VERSION + 8) {
+        static const char v[] = "1.0.0";
+        uint16_t i = reg - WBFW_REG_FW_VERSION;
+        return (i < sizeof v - 1) ? (uint8_t)v[i] : 0;
+    }
+    if (reg >= WBFW_REG_SIGNATURE && reg < WBFW_REG_SIGNATURE + WBFW_SIGNATURE_LEN) {
+        static const char s[] = WBFW_SIGNATURE;
+        uint16_t i = reg - WBFW_REG_SIGNATURE;
+        return (i < sizeof s - 1) ? (uint8_t)s[i] : 0;
+    }
+    if (reg >= WBFW_REG_BOOTLOADER_VERSION && reg < WBFW_REG_BOOTLOADER_VERSION + 8) {
+        static const char b[] = "1.0.0";
+        uint16_t i = reg - WBFW_REG_BOOTLOADER_VERSION;
+        return (i < sizeof b - 1) ? (uint8_t)b[i] : 0;
+    }
+
+    switch (reg) {
+    case REGMAP_ADDR_HW_INFO + 0: return 0x1283;              /* модель: 128x32 */
+    case REGMAP_ADDR_HW_INFO + 2: return 1;                   /* версия прошивки */
+    case REGMAP_ADDR_HW_INFO + 3: return 0;
+    case REGMAP_ADDR_HW_INFO + 4: return 0;
+
+    case REGMAP_ADDR_CONTROL + 0: return anim_to_mode();
+    case REGMAP_ADDR_CONTROL + 1: return font_id;
+    case REGMAP_ADDR_CONTROL + 2: return clk_set;
+    case REGMAP_ADDR_CONTROL + 3: return 0;
+    case REGMAP_ADDR_CONTROL + 4: return cfg.on_us;
+    case REGMAP_ADDR_CONTROL + 5: return fb_inverted;
+
+    case REGMAP_ADDR_TIME + 2:    return (uint16_t)mb_tz_min;
+
+    case REGMAP_ADDR_STATUS + 0:  return (uint16_t)(cfg.slotus * cfg.slots);
+    case REGMAP_ADDR_STATUS + 1:  return cfg.slotus;
+    case REGMAP_ADDR_STATUS + 2:  return (uint16_t)(HAL_GetTick() / 1000U);
+    case REGMAP_ADDR_STATUS + 3:  return (uint16_t)(HAL_GetTick() / 1000U >> 16);
+    case REGMAP_ADDR_STATUS + 4:  return mb_errors;
+    default: break;
+    }
+
+    /* строки текста: по два символа в регистре */
+    if (reg >= REGMAP_ADDR_TEXT1 && reg < REGMAP_ADDR_TEXT1 + TEXT_LINES * TEXT_STRIDE) {
+        uint16_t off = reg - REGMAP_ADDR_TEXT1;
+        uint16_t ln = off / TEXT_STRIDE, i = (off % TEXT_STRIDE) * 2;
+        if (ln < TEXT_LINES && i + 1 < TEXT_LEN)
+            return (uint16_t)(((uint8_t)mb_text[ln][i] << 8) | (uint8_t)mb_text[ln][i + 1]);
+    }
+    return 0;
+}
+
+static int mb_write_reg(uint16_t reg, uint16_t v)
+{
+    /* уход в загрузчик по шине — то же, что делает ключ -j у флешера ВБ */
+    if ((reg == WBFW_REG_JUMP_TO_BOOT_STANDARD_BAUD ||
+         reg == WBFW_REG_JUMP_TO_BOOT_CURRENT_BAUD) && v == 1) {
+        boot_request = 1;                 /* ответим и уйдём: у нас ~5 мс по протоколу */
+        return 1;
+    }
+
+    switch (reg) {
+    case REGMAP_ADDR_CONTROL + 0: mode_apply(v); return 1;
+    case REGMAP_ADDR_CONTROL + 1: if (v < 3) font_id = (uint8_t)v; return 1;
+    case REGMAP_ADDR_CONTROL + 2: if (v < DIGITS_COUNT) clk_set = (uint8_t)v; return 1;
+    case REGMAP_ADDR_CONTROL + 3: return 1;                     /* раскладка часов сама */
+    case REGMAP_ADDR_CONTROL + 4: cfg.on_us = v; dirty = 1; return 1;   /* яркость */
+    case REGMAP_ADDR_CONTROL + 5: fb_invert_to(v & VFD_FLAG_INVERT); return 1;
+
+    /* старшее слово приходит первым, применяем по приходу младшего */
+    case REGMAP_ADDR_TIME + 0: mb_unix_hi = v; return 1;
+    case REGMAP_ADDR_TIME + 1: mb_set_unixtime(((uint32_t)mb_unix_hi << 16) | v); return 1;
+    case REGMAP_ADDR_TIME + 2: mb_tz_min = (int16_t)v; return 1;
+    default: break;
+    }
+
+    if (reg >= REGMAP_ADDR_TEXT1 && reg < REGMAP_ADDR_TEXT1 + TEXT_LINES * TEXT_STRIDE) {
+        uint16_t off = reg - REGMAP_ADDR_TEXT1;
+        uint16_t ln = off / TEXT_STRIDE, i = (off % TEXT_STRIDE) * 2;
+        if (ln < TEXT_LINES && i + 1 < TEXT_LEN) {
+            mb_text[ln][i] = (char)(v >> 8);
+            mb_text[ln][i + 1] = (char)(v & 0xFF);
+            mb_text_dirty = 1;
+            return 1;
+        }
+    }
+    return 0;                                   /* адрес не наш */
+}
+
+static void mb_handle(const uint8_t *req, int len)
+{
+    if (len < 4 || req[0] != MB_ADDR) return;               /* не нам */
+    if (mb_crc(req, len - 2) != (uint16_t)(req[len - 2] | (req[len - 1] << 8))) {
+        mb_errors++;
+        return;                                            /* битый кадр — молчим */
+    }
+
+    uint8_t fn = req[1];
+    uint16_t reg = (uint16_t)((req[2] << 8) | req[3]);
+    uint16_t cnt = (uint16_t)((req[4] << 8) | req[5]);
+
+    if (fn == 0x03 || fn == 0x04) {                         /* чтение регистров */
+        if (cnt == 0 || cnt > 125) { mb_exception(fn, 0x03); return; }
+        uint8_t r[256];
+        r[0] = MB_ADDR; r[1] = fn; r[2] = (uint8_t)(cnt * 2);
+        for (uint16_t i = 0; i < cnt; i++) {
+            uint16_t v = mb_read_reg((uint16_t)(reg + i));
+            r[3 + i * 2] = (uint8_t)(v >> 8);
+            r[4 + i * 2] = (uint8_t)(v & 0xFF);
+        }
+        mb_reply(r, 3 + cnt * 2);
+        return;
+    }
+
+    if (fn == 0x06) {                                       /* запись одного */
+        if (!mb_write_reg(reg, cnt)) { mb_exception(fn, 0x02); return; }
+        uint8_t r[6] = { req[0], req[1], req[2], req[3], req[4], req[5] };
+        mb_reply(r, 6);
+        return;
+    }
+
+    if (fn == 0x10) {                                       /* запись нескольких */
+        uint8_t nb = req[6];
+        if (len < 9 + nb) { mb_errors++; return; }
+        for (uint16_t i = 0; i < cnt; i++) {
+            uint16_t v = (uint16_t)((req[7 + i * 2] << 8) | req[8 + i * 2]);
+            if (!mb_write_reg((uint16_t)(reg + i), v)) { mb_exception(fn, 0x02); return; }
+        }
+        uint8_t r[6] = { req[0], req[1], req[2], req[3], req[4], req[5] };
+        mb_reply(r, 6);
+        return;
+    }
+
+    mb_exception(fn, 0x01);
+}
+
 static void handle(char *line)
 {
     /* Текст с пробелами разбираем до strtok: "t1 привет мир" -> строка 1.
@@ -830,9 +1129,9 @@ static void handle(char *line)
             upf("линия (%d,%d)-(%d,%d)\r\n", x0, y0, x1, y1);
         } else up("line X0 Y0 X1 Y1\r\n");
     }
-    else if (!strcmp(c, "iv"))     {   /* инверсия кадра: проверка «плотная картинка резче» */
-        for (int y = 0; y < 32; y++) for (int i = 0; i < 16; i++) fb[y][i] = (uint8_t)~fb[y][i];
-        dirty = 1; up("ok\r\n");
+    else if (!strcmp(c, "iv"))     {   /* инверсия кадра, тот же флаг видит шина */
+        fb_invert_to(!fb_inverted);
+        upf("инверсия %s\r\n", fb_inverted ? "вкл" : "выкл");
     }
     else if (!strcmp(c, "px"))     {   /* px X Y [0|1] — точка в видимых координатах */
         if (a && b) { anim = 0; demo_on = 0;
@@ -959,7 +1258,25 @@ int main(void)
         }
         if (dirty) rebuild();
         scan_frame();
+        if (mb_text_dirty && anim == 0) mb_text_redraw();
+        if (boot_request) {                       /* ответ уже в очереди — дождёмся и уйдём */
+            while (txtail != txhead) { }
+            HAL_Delay(2);
+            *(volatile uint32_t *)BOOT_MAGIC_ADDR = BOOT_MAGIC_STAY;
+            NVIC_SystemReset();
+        }
         while (rx_get(&ch)) {
+            /* Modbus или консоль? Кадр Modbus начинается с адреса 0x01, такого
+               байта в текстовых командах не бывает. Пока кадр собирается, байты
+               в консоль не попадают. */
+            if (mb_len || (li == 0 && ch == MB_ADDR)) {
+                if (mb_len < MB_BUF) mb_buf[mb_len++] = ch;
+                if (mb_len >= mb_expected(mb_buf, mb_len)) {   /* кадр целиком */
+                    mb_handle(mb_buf, mb_len);
+                    mb_len = 0;
+                }
+                continue;
+            }
             /* стрелки: ESC [ A вверх, ESC [ B вниз */
             static uint8_t esc = 0;
             if (ch == 27) { esc = 1; continue; }

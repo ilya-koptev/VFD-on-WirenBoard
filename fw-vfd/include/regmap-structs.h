@@ -107,10 +107,12 @@ enum vfd_clock_layout {
     m(     0x20,    TIME,           RW, \
                     /* Батарейного хода у модуля нет: контроллер пишет время, МК \
                        тикает от своего таймера между синхронизациями. */ \
+                    /* старшее слово первым: так 32-битное значение читается \
+                       штатным типом u32 в wb-mqtt-serial без перестановок */ \
                     union { \
                         struct { \
-        /* 0x20 */          uint16_t unixtime_lo; \
-        /* 0x21 */          uint16_t unixtime_hi; \
+        /* 0x20 */          uint16_t unixtime_hi; \
+        /* 0x21 */          uint16_t unixtime_lo; \
                         }; \
                         uint16_t unixtime[2]; \
                     }; \
@@ -165,3 +167,14 @@ enum vfd_clock_layout {
 REGMAP(__REGMAP_STRUCTS)
 
 #undef __REGMAP_STRUCTS
+
+/* Адреса регионов тем же макросом: и прошивка, и утилиты берут их отсюда,
+   поэтому разъехаться с описанием выше они не могут. */
+#define __REGMAP_ADDRS(addr, name, rw, fields) REGMAP_ADDR_##name = addr,
+
+enum regmap_addr { REGMAP(__REGMAP_ADDRS) };
+
+#undef __REGMAP_ADDRS
+
+/* Шаг между строками текста в адресах: TEXT1 = 0x40, TEXT2 = 0x50, ... */
+#define TEXT_STRIDE  (REGMAP_ADDR_TEXT2 - REGMAP_ADDR_TEXT1)
