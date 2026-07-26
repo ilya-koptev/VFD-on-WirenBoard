@@ -29,6 +29,8 @@
 #include <stdarg.h>
 #include <math.h>
 #include "logo.h"
+#include "fonts.h"
+#include "digits.h"
 
 #define LAT_PORT GPIOB
 #define LAT_PIN  GPIO_PIN_6
@@ -48,8 +50,7 @@
 #define SO2_PIN  GPIO_PIN_5
 
 #define MAX_SLOTS 44
-#define MAX_BYTES 60          /* 480 бит, если у платы две цепи каскадом */
-#define RAW_BYTES 80          /* до 640 бит для измерения длины цепи */
+#define MAX_BYTES 30          /* 240 бит — длина цепи измерена обраткой SO1 */
 
 UART_HandleTypeDef huart2;
 SPI_HandleTypeDef  hspi1;
@@ -68,36 +69,16 @@ static struct {
     uint8_t miry;    /* 1 = зеркалить Y (карта строк идёт снизу вверх)            */
     uint8_t rev;     /* 1 = перевернуть порядок 240 бит в потоке (бит1 последним) */
     uint8_t bytes;   /* 30 или 60 байт на слот                                    */
-    uint8_t dup;     /* при 60 байтах: 0 = данные+нули, 1 = данные дважды, 2 = нули+данные */
     uint8_t mode;    /* 0 = гасим-сдвигаем-латчим; 1 = сдвиг во время показа (по даташиту) */
     uint16_t on_us;  /* доп. время показа в слоте, мкс                            */
     uint16_t blk_us; /* длительность гашения, мкс (>=10 по даташиту)              */
-    int16_t  gfix;   /* -1 = гнать все слоты, иначе только этот слот              */
-    int16_t  probe;  /* -1 = обычный рендер, иначе только этот бит регистра 1..240 */
-    uint8_t  scan;   /* 1 = скан идёт, 0 = стоп (BLK удерживаем HIGH)             */
-    uint16_t hold;   /* мс статики без тактов после показа (0 = не держать)       */
-    uint8_t  blkpol; /* 0 = HIGH гасит (по даташиту), 1 = наоборот                */
-    uint8_t  latpol; /* 0 = импульс HIGH, 1 = импульс LOW                        */
-    uint8_t  nolat;  /* 1 = не дёргать LAT вообще                                 */
-    uint8_t  gcp;    /* сколько импульсов GCP выдавать за слот (даташит: 5-6)      */
-    uint16_t bbdly;  /* доп. задержка на бит в битбенге, мкс (замедление CLK)      */
-    uint8_t  rtz;    /* 1 = return-to-zero: сразу после такта гасим линию данных.
-                        Даташит требует VIL <= 0.7 В — жёстко; если земля/линия
-                        подсаживают ноль, единица «протягивается» в следующие
-                        разряды. RTZ даёт линии почти весь бит на спад.        */
-    uint16_t setus;  /* время установки данных до фронта CLK, мкс (0 = ~60 нс)     */
-    uint16_t rddly;  /* задержка фазы такта при ЧТЕНИИ через SO1, мкс (для sord):
-                        позволяет отделить смаз записи от медленного спада SO1 */
     uint16_t slotus; /* ФИКСИРОВАННЫЙ период слота, мкс (0 = как получится).
                         Выравнивает кадр: убирает дрожание от прерываний и от
                         разной длины кода в слотах. Даташит: слот ~100 мкс.     */
-    uint16_t clkns;  /* длительность полки такта, нс (даташит: >=200, период >=400) */
     uint8_t  revrow; /* 1 = реверс шести бит внутри строки: afbecd -> dcebfa
                         (так у mariosgit; у нас проверяем оба варианта)          */
-} cfg = { 44, 1, 1, 0, 0, 1, 1, 0, 30, 0, 1, 0, 12, -1, -1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 2, 0, 250, 0 };
-
-/* Роли LAT/BLK можно менять в рантайме: подписи на разъёме могут не совпадать с реальностью */
-static uint16_t pin_lat = LAT_PIN, pin_blk = BLK_PIN;
+} cfg = { 44, 1, 1, 0, 0, 1, 1, 0, 30, 1, 0, 12, 250, 0 };
+/* slots gstep dbl triad par mir miry rev bytes mode on_us blk_us slotus revrow */
 
 static void blk_blank(void);
 static void blk_show(void);
@@ -106,9 +87,6 @@ static void lat_pulse(void);
 static uint8_t slotbuf[MAX_SLOTS][MAX_BYTES];
 static volatile uint8_t dirty = 1;
 
-/* --- сырой поток для измерения топологии цепи: блок единиц [rs, rs+rn) в потоке rt бит --- */
-static uint8_t rawbuf[RAW_BYTES];
-static struct { uint8_t en, manual; uint16_t rs, rn, rt; } raw = { 0, 0, 0, 48, 600 };
 
 /* ---------- консоль ---------- */
 #define RXSZ 256
@@ -116,8 +94,26 @@ static volatile uint8_t rxbuf[RXSZ];
 static volatile uint16_t rxhead = 0, rxtail = 0;
 static uint8_t rxbyte;
 
+/* исходящий кольцевой буфер: передача идёт по прерыванию TXE,
+   чтобы вывод не тормозил разбор входящих байтов */
+#define TXSZ 256
+static volatile uint8_t txbuf[TXSZ];
+static volatile uint16_t txhead = 0, txtail = 0;
+
 void SysTick_Handler(void)  { HAL_IncTick(); }
-void USART2_IRQHandler(void){ HAL_UART_IRQHandler(&huart2); }
+void USART2_IRQHandler(void)
+{
+    if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_TXE) &&
+        __HAL_UART_GET_IT_SOURCE(&huart2, UART_IT_TXE)) {
+        if (txtail != txhead) {
+            huart2.Instance->DR = txbuf[txtail];
+            txtail = (uint16_t)((txtail + 1) % TXSZ);
+        } else {
+            __HAL_UART_DISABLE_IT(&huart2, UART_IT_TXE);
+        }
+    }
+    HAL_UART_IRQHandler(&huart2);
+}
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *h)
 {
     if (h->Instance == USART2) {
@@ -131,12 +127,28 @@ static int rx_get(uint8_t *b)
     if (rxtail == rxhead) return 0;
     *b = rxbuf[rxtail]; rxtail = (rxtail + 1) % RXSZ; return 1;
 }
-static void up(const char *s) { HAL_UART_Transmit(&huart2, (uint8_t *)s, strlen(s), HAL_MAX_DELAY); }
+/* ---------- неблокирующая передача ----------
+   Блокирующий HAL_UART_Transmit в цикле приёма тормозил разбор входящих байтов,
+   и на русских буквах (два байта на символ) в строку влезал мусор. Теперь всё
+   исходящее складывается в кольцевой буфер и уходит по прерыванию TXE. */
+
+static void tx_push(const char *d, int n)
+{
+    for (int i = 0; i < n; i++) {
+        uint16_t nx = (uint16_t)((txhead + 1) % TXSZ);
+        while (nx == txtail) { }                  /* буфер полон — ждём передатчик */
+        txbuf[txhead] = (uint8_t)d[i];
+        txhead = nx;
+    }
+    __HAL_UART_ENABLE_IT(&huart2, UART_IT_TXE);
+}
+
+static void up(const char *s) { tx_push(s, (int)strlen(s)); }
 static void upf(const char *f, ...)
 {
     char b[128]; va_list a; va_start(a, f);
     int n = vsnprintf(b, sizeof b, f, a); va_end(a);
-    if (n > 0) HAL_UART_Transmit(&huart2, (uint8_t *)b, (uint16_t)n, HAL_MAX_DELAY);
+    if (n > 0) tx_push(b, n);
 }
 
 /* ---------- микросекундные задержки на DWT ---------- */
@@ -153,19 +165,29 @@ static void udelay(uint32_t us)
     while ((DWT->CYCCNT - start) < ticks) { }
 }
 
-/* Подождать N тактов процессора (для полок такта короче микросекунды) */
-static inline void cyc_wait(uint32_t cycles)
-{
-    uint32_t t0 = DWT->CYCCNT;
-    while ((DWT->CYCCNT - t0) < cycles) { }
-}
-
 /* Догнать фиксированный период слота: убирает дрожание кадра */
 static void slot_wait(uint32_t t0)
 {
     if (!cfg.slotus) return;
     uint32_t need = cfg.slotus * (SystemCoreClock / 1000000U);
     while ((DWT->CYCCNT - t0) < need) { }
+}
+
+/* ---------- история команд ----------
+   Последние 10 введённых строк, стрелки вверх и вниз листают их, как в оболочке.
+   Терминал присылает стрелку тремя байтами: ESC, '[', 'A' или 'B'. */
+#define HIST_N 5
+static char hist[HIST_N][40];
+static uint8_t hist_cnt = 0;      /* сколько всего запомнено */
+static int8_t hist_sel = -1;      /* -1 = набираем новое, иначе индекс в истории */
+
+static void hist_add(const char *l)
+{
+    if (!l[0]) return;
+    if (hist_cnt && !strcmp(hist[0], l)) return;      /* не дублируем подряд */
+    for (int i = HIST_N - 1; i > 0; i--) memcpy(hist[i], hist[i - 1], 40);
+    strncpy(hist[0], l, 39); hist[0][39] = 0;
+    if (hist_cnt < HIST_N) hist_cnt++;
 }
 
 static void Error_Handler(void) { while (1) { } }
@@ -417,6 +439,74 @@ static void fb_cube(float a)
         fb_line(px[E[i][0]], py[E[i][0]], px[E[i][1]], py[E[i][1]]);
 }
 
+/* ---------- часы крупными цифрами ----------
+   Два набора цифр (profont29 14x19 и 7Segments 26x32), только 0..9, двоеточие
+   и пробел. Ход времени — от системного таймера, батарейного хода у платы нет,
+   поэтому после сброса время выставляется заново командой time. */
+static uint8_t font_id;                     /* определение ниже, у шрифтов */
+static void fb_text(int x, int y, const char *t);
+
+/* дата под часами: месяц словами, строка центрируется мелким шрифтом */
+static uint8_t dt_d = 26, dt_mo = 7;
+static uint16_t dt_y = 2026;
+static const char *MONTHS[12] = { "января", "февраля", "марта", "апреля", "мая", "июня",
+                                  "июля", "августа", "сентября", "октября", "ноября", "декабря" };
+static const uint8_t MDAYS[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+
+static void date_next(void)                 /* следующий день, с учётом февраля */
+{
+    uint8_t last = MDAYS[(dt_mo - 1) % 12];
+    if (dt_mo == 2 && ((dt_y % 4 == 0 && dt_y % 100 != 0) || dt_y % 400 == 0)) last = 29;
+    if (++dt_d > last) { dt_d = 1; if (++dt_mo > 12) { dt_mo = 1; dt_y++; } }
+}
+
+static uint8_t clk_h = 12, clk_m = 0, clk_s = 0;
+static uint32_t clk_tick = 0;               /* метка последней секунды */
+
+static void fb_digits(int x, int y, const char *t)
+{
+    const digits_t *d = &DIGITS[0];
+    for (; *t && x < 128; t++) {
+        int gi = (*t >= '0' && *t <= '9') ? *t - '0' : (*t == ':' ? 10 : 11);
+        const uint8_t *g = d->data + (size_t)gi * d->h * d->by;
+        for (int row = 0; row < d->h; row++)
+            for (int col = 0; col < d->w; col++)
+                if ((g[row * d->by + (col >> 3)] >> (7 - (col & 7))) & 1)
+                    fb_set(x + col, 31 - (y + (d->h - 1 - row)), 1);
+        x += d->w + 1;
+    }
+}
+
+static void clock_tick(void)                /* отсчёт секунд */
+{
+    uint32_t now = HAL_GetTick();
+    while (now - clk_tick >= 1000U) {
+        clk_tick += 1000U;
+        if (++clk_s >= 60) { clk_s = 0; if (++clk_m >= 60) { clk_m = 0; if (++clk_h >= 24) { clk_h = 0; date_next(); } } }
+    }
+}
+
+static void clock_draw(void)
+{
+    const digits_t *d = &DIGITS[0];
+    char buf[16];
+    int per = d->w + 1;
+    snprintf(buf, sizeof buf, "%02u:%02u:%02u", clk_h, clk_m, clk_s);
+    int wid = (int)strlen(buf) * per - 1;
+    fb_clear();
+    fb_digits((128 - wid) / 2, 32 - d->h, buf);      /* часы вверху: ноль у этого поля ВНИЗУ */
+
+    /* дата снизу по центру, мелким шрифтом 5x8: "26 июля 2026" */
+    snprintf(buf, sizeof buf, "%u %s", dt_d, MONTHS[(dt_mo - 1) % 12]);
+    uint8_t save = font_id;
+    font_id = 2;                                     /* дата крупным 7x13 */
+    const font_t *f = &FONTS[2];
+    int tw = 0;
+    for (const char *q = buf; *q; q++) if (((uint8_t)*q & 0xC0) != 0x80) tw += f->w + 1;
+    fb_text((128 - tw) / 2 > 0 ? (128 - tw) / 2 : 0, 0, buf);   /* дата в нулевую строку, то есть снизу */
+    font_id = save;
+}
+
 static uint8_t anim = 0;              /* 0 = статика, 1 = куб, 2 = лого */
 static uint8_t demo_on = 1;           /* 1 = сам чередует куб и лого по 15 с */
 #define DEMO_MS 15000U
@@ -428,54 +518,52 @@ static void fb_checker(int sz)
             fb_set(x, y, ((x / sz) + (y / sz)) & 1);
 }
 
-static const uint8_t FONT5x7[][5] = {
- {0,0,0,0,0},{0x3E,0x51,0x49,0x45,0x3E},{0,0x42,0x7F,0x40,0},{0x42,0x61,0x51,0x49,0x46},{0x21,0x41,0x45,0x4B,0x31},
- {0x18,0x14,0x12,0x7F,0x10},{0x27,0x45,0x45,0x45,0x39},{0x3C,0x4A,0x49,0x49,0x30},{0x01,0x71,0x09,0x05,0x03},
- {0x36,0x49,0x49,0x49,0x36},{0x06,0x49,0x49,0x29,0x1E},{0x7E,0x11,0x11,0x11,0x7E},{0x7F,0x49,0x49,0x49,0x36},
- {0x3E,0x41,0x41,0x41,0x22},{0x7F,0x41,0x41,0x22,0x1C},{0x7F,0x49,0x49,0x49,0x41},{0x7F,0x09,0x09,0x09,0x01},
- {0x3E,0x41,0x49,0x49,0x7A},{0x7F,0x08,0x08,0x08,0x7F},{0x00,0x41,0x7F,0x41,0x00},{0x20,0x40,0x41,0x3F,0x01},
- {0x7F,0x08,0x14,0x22,0x41},{0x7F,0x40,0x40,0x40,0x40},{0x7F,0x02,0x0C,0x02,0x7F},{0x7F,0x04,0x08,0x10,0x7F},
- {0x3E,0x41,0x41,0x41,0x3E},{0x7F,0x09,0x09,0x09,0x06},{0x3E,0x41,0x51,0x21,0x5E},{0x7F,0x09,0x19,0x29,0x46},
- {0x46,0x49,0x49,0x49,0x31},{0x01,0x01,0x7F,0x01,0x01},{0x3F,0x40,0x40,0x40,0x3F},{0x1F,0x20,0x40,0x20,0x1F},
- {0x3F,0x40,0x38,0x40,0x3F},{0x63,0x14,0x08,0x14,0x63},{0x07,0x08,0x70,0x08,0x07},{0x61,0x51,0x49,0x45,0x43}};
 
-static void fb_char(int x, int y, char c)
+
+
+/* ---------- текст выбранным шрифтом ----------
+   Три шрифта на выбор (5x8, 6x10, 7x13), латиница и кириллица.
+   Индексы глифов: 0..94 = ASCII 32..126, 95 = Ё, 96..159 = А..я, 160 = ё.
+   Дисплей переворачивает кадр по вертикали, поэтому пишем в 31 - y. */
+static uint8_t font_id = 1;
+
+static int glyph_index(uint32_t cp)
 {
-    int idx = -1;
-    if (c == ' ') idx = 0;
-    else if (c >= '0' && c <= '9') idx = 1 + (c - '0');
-    else if (c >= 'A' && c <= 'Z') idx = 11 + (c - 'A');
-    else if (c >= 'a' && c <= 'z') idx = 11 + (c - 'a');
-    if (idx < 0) return;
-    for (int col = 0; col < 5; col++) {
-        uint8_t cd = FONT5x7[idx][col];
-        for (int row = 0; row < 7; row++) fb_set(x + col, y + row, (cd >> (6 - row)) & 1);
+    if (cp >= 32 && cp <= 126) return cp - 32;
+    if (cp == 0x401) return 95;             /* Ё */
+    if (cp >= 0x410 && cp <= 0x44F) return 96 + (cp - 0x410);
+    if (cp == 0x451) return 160;            /* ё */
+    return -1;
+}
+
+/* Одна буква в видимой позиции (x, y) */
+static int fb_glyph(int x, int y, uint32_t cp)
+{
+    const font_t *f = &FONTS[font_id % 3];
+    int gi = glyph_index(cp);
+    if (gi < 0) return f->w + 1;
+    const uint8_t *g = f->data + (size_t)gi * f->h;
+    for (int row = 0; row < f->h; row++)
+        for (int col = 0; col < f->w; col++)
+            if ((g[row] >> (7 - col)) & 1)
+                fb_set(x + col, 31 - (y + (f->h - 1 - row)), 1);
+    return f->w + 1;                        /* шаг до следующего символа */
+}
+
+/* Строка UTF-8: русская буква приходит двумя байтами, разбираем на месте */
+static void fb_text(int x, int y, const char *t)
+{
+    while (*t) {
+        uint32_t cp = (uint8_t)*t++;
+        if (cp >= 0xC0 && *t) {             /* двухбайтовая последовательность */
+            uint32_t b2 = (uint8_t)*t++;
+            cp = ((cp & 0x1F) << 6) | (b2 & 0x3F);
+        }
+        x += fb_glyph(x, y, cp);
+        if (x >= 128) break;
     }
 }
-/* Символ и строка в ориентации стенда: (x, y) — ВИДИМАЯ позиция.
-   Этот дисплей переворачивает кадр по вертикали, поэтому пишем с flip по Y,
-   а горизонталь оставляем как есть. */
-static void fb_char180(int x, int y, char c)
-{
-    int idx = -1;
-    if (c == ' ') idx = 0;
-    else if (c >= '0' && c <= '9') idx = 1 + (c - '0');
-    else if (c >= 'A' && c <= 'Z') idx = 11 + (c - 'A');
-    else if (c >= 'a' && c <= 'z') idx = 11 + (c - 'a');
-    if (idx < 0) return;
-    for (int col = 0; col < 5; col++) {
-        uint8_t cd = FONT5x7[idx][col];
-        for (int row = 0; row < 7; row++)
-            if ((cd >> (6 - row)) & 1) fb_set(x + col, 31 - (y + row), 1);
-    }
-}
 
-static void fb_str180(int x, int y, const char *t)
-{
-    while (*t) { fb_char180(x, y, *t++); x += 6; }
-}
-
-static void fb_str(int x, int y, const char *s) { while (*s) { fb_char(x, y, *s++); x += 6; } }
 
 /* ---------- сборка слотов сдвигового регистра ---------- */
 static inline void reg_bit(uint8_t *buf, int bit1, int nbytes240)
@@ -484,10 +572,7 @@ static inline void reg_bit(uint8_t *buf, int bit1, int nbytes240)
     int b = cfg.rev ? (241 - bit1) : bit1;
     int idx = b - 1;
     if (idx < 0 || idx >= 240) return;
-    /* при 60 байтах данные могут лежать во второй половине */
-    int base = 0;
-    if (nbytes240 == 60 && cfg.dup == 2) base = 30;
-    buf[base + (idx >> 3)] |= (0x80 >> (idx & 7));
+    buf[idx >> 3] |= (0x80 >> (idx & 7));
 }
 
 static void build_slot(int k)
@@ -507,370 +592,81 @@ static void build_slot(int k)
     int odd = (k & 1) ^ (cfg.par ? 1 : 0);
     const int *off = odd ? tD : tA;
 
-    if (cfg.probe >= 1 && cfg.probe <= 192) {
-        reg_bit(buf, cfg.probe, cfg.bytes);
-    } else {
-        int col0 = g * 3;
-        for (int row = 0; row < 32; row++) {
-            for (int i = 0; i < 3; i++) {
-                int x = col0 + i;
-                if (x >= 128) continue;
-                int xx = cfg.mir  ? (127 - x)   : x;
-                int yy = cfg.miry ? (31 - row)  : row;
-                int slot = cfg.revrow ? (5 - off[i]) : off[i];   /* afbecd -> dcebfa */
-                if (fb_get(xx, yy)) reg_bit(buf, row * 6 + slot + 1, cfg.bytes);
-            }
+    int col0 = g * 3;
+    for (int row = 0; row < 32; row++) {
+        for (int i = 0; i < 3; i++) {
+            int x = col0 + i;
+            if (x >= 128) continue;
+            int xx = cfg.mir  ? (127 - x)   : x;
+            int yy = cfg.miry ? (31 - row)  : row;
+            int slot = cfg.revrow ? (5 - off[i]) : off[i];   /* afbecd -> dcebfa */
+            if (fb_get(xx, yy)) reg_bit(buf, row * 6 + slot + 1, cfg.bytes);
         }
     }
 
     /* --- выбор сеток: бит 193+g, плюс сосед при dbl --- */
-    if (cfg.probe >= 193 && cfg.probe <= 236) {
-        reg_bit(buf, cfg.probe, cfg.bytes);
-    } else {
-        reg_bit(buf, 193 + g, cfg.bytes);
-        if (cfg.dbl) reg_bit(buf, 193 + ((g + 1) % 44), cfg.bytes);
-    }
+    reg_bit(buf, 193 + g, cfg.bytes);
+    if (cfg.dbl) reg_bit(buf, 193 + ((g + 1) % 44), cfg.bytes);
 
-    /* --- дублирование во вторую цепь (SIN2), если плата каскадом --- */
-    if (cfg.bytes == 60 && cfg.dup == 1) memcpy(buf + 30, buf, 30);
 }
 
-/* ---------- битбенг с произвольным назначением ролей пинам ----------
-   Подписи на разъёме могут не соответствовать реальным входам стекла, поэтому
-   роли (data/clock/latch/blank) назначаются в рантайме командой perm. */
-static GPIO_TypeDef *const BBPORT[4] = { GPIOA, GPIOA, GPIOB, GPIOB };
-static const uint16_t     BBPIN[4]   = { GPIO_PIN_5, GPIO_PIN_7, GPIO_PIN_6, GPIO_PIN_4 };
-static const char        *BBNAME[4]  = { "PA5", "PA7", "PB6", "PB4" };
-static uint8_t bb_on = 0;
-static uint8_t r_dat = 1, r_clk = 0, r_lat = 2, r_blk = 3;   /* как подписано на плате */
 
-static inline void bb_set(uint8_t i, int v)
-{
-    BBPORT[i]->BSRR = v ? BBPIN[i] : (uint32_t)BBPIN[i] << 16;
-}
 
-/* Крутизна фронтов на 4 линиях. Медленные фронты = меньше звона и наводки
-   CLK -> SIN на дюпонах; проверяем, не из-за них ли единица «протягивается». */
-static uint32_t bb_slew = GPIO_SPEED_FREQ_VERY_HIGH;
 
-static void bb_enable(int on)
-{
-    GPIO_InitTypeDef g = {0};
-    if (on) {
-        HAL_SPI_DeInit(&hspi1);
-        g.Mode = GPIO_MODE_OUTPUT_PP; g.Pull = GPIO_NOPULL; g.Speed = bb_slew;
-        g.Pin = GPIO_PIN_5 | GPIO_PIN_7; HAL_GPIO_Init(GPIOA, &g);
-        g.Pin = GPIO_PIN_6 | GPIO_PIN_4; HAL_GPIO_Init(GPIOB, &g);
-        bb_set(r_clk, 0);
-    } else {
-        SPI1_Init();
-    }
-    bb_on = on ? 1 : 0;
-}
 
-static void bb_send(const uint8_t *buf, int nbits)
-{
-    /* SysTick (1 кГц) влезал в середину сдвига и растягивал такт — от кадра к кадру
-       менялось, какие биты защёлкнутся, отсюда дрожание картинки. Глушим только его,
-       USART оставляем живым, чтобы не терять символы консоли. */
-    uint32_t st_ctrl = SysTick->CTRL;
-    SysTick->CTRL &= ~SysTick_CTRL_TICKINT_Msk;
 
-    /* Полки такта задаём в ТАКТАХ ПРОЦЕССОРА, а не в nop'ах: ядро теперь 100 МГц,
-       и nop'ы дали бы 40 нс вместо даташитных 200 нс. cfg.clkns — длительность
-       каждой полки в наносекундах (по умолчанию 250 нс -> период 500 нс). */
-    /* Всё, что можно, выносим ИЗ цикла: на 100 МГц каждое обращение к полям
-       конфига и индексация массивов стоили ~1.7 мкс на бит — больше самих полок. */
-    const uint32_t mhz = SystemCoreClock / 1000000U;
-    uint32_t half = mhz * cfg.clkns / 1000U;
-    if (half < 2) half = 2;
-    const uint32_t setc = cfg.setus ? cfg.setus * mhz : half;
-    const uint32_t holdc = half / 4 + 2;                  /* SIN hold >= 50 нс */
-    const uint32_t bbc = cfg.bbdly ? cfg.bbdly * mhz : 0;
-    const uint8_t rtz = cfg.rtz;
-
-    GPIO_TypeDef *const dp = BBPORT[r_dat];
-    GPIO_TypeDef *const cp = BBPORT[r_clk];
-    const uint32_t dset = BBPIN[r_dat], dclr = (uint32_t)BBPIN[r_dat] << 16;
-    const uint32_t cset = BBPIN[r_clk], cclr = (uint32_t)BBPIN[r_clk] << 16;
-
-    for (int i = 0; i < nbits; i++) {
-        dp->BSRR = ((buf[i >> 3] >> (7 - (i & 7))) & 1) ? dset : dclr;
-        cyc_wait(setc);                   /* данные до фронта: >= 40 нс по даташиту */
-        cp->BSRR = cset;
-        cyc_wait(half);                   /* CLK high >= 200 нс */
-        cp->BSRR = cclr;
-        cyc_wait(holdc);
-        if (rtz) dp->BSRR = dclr;         /* дальше линия падает весь остаток бита */
-        cyc_wait(half);                   /* CLK low >= 200 нс */
-        if (bbc) cyc_wait(bbc);
-    }
-
-    SysTick->CTRL = st_ctrl;
-}
-
-/* LAT/BLK: в битбенге — по назначенным ролям, иначе — по подписям разъёма */
+/* LAT/BLK: BLK HIGH гасит поле, LATCH переносит регистр в защёлки */
 static void blk_blank(void)
 {
-    int lvl = cfg.blkpol ? 0 : 1;
-    if (bb_on) bb_set(r_blk, lvl);
-    else HAL_GPIO_WritePin(GPIOB, pin_blk, lvl ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(BLK_PORT, BLK_PIN, GPIO_PIN_SET);      /* HIGH гасит */
 }
 static void blk_show(void)
 {
-    int lvl = cfg.blkpol ? 1 : 0;
-    if (bb_on) bb_set(r_blk, lvl);
-    else HAL_GPIO_WritePin(GPIOB, pin_blk, lvl ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(BLK_PORT, BLK_PIN, GPIO_PIN_RESET);    /* LOW показывает */
 }
 static void lat_pulse(void)
 {
-    if (cfg.nolat) return;
-    int hi = cfg.latpol ? 0 : 1;
-    if (bb_on) { bb_set(r_lat, hi); udelay(1); bb_set(r_lat, !hi); }
-    else {
-        HAL_GPIO_WritePin(GPIOB, pin_lat, hi ? GPIO_PIN_SET : GPIO_PIN_RESET);
-        udelay(1);
-        HAL_GPIO_WritePin(GPIOB, pin_lat, hi ? GPIO_PIN_RESET : GPIO_PIN_SET);
-    }
+    HAL_GPIO_WritePin(LAT_PORT, LAT_PIN, GPIO_PIN_SET);
+    udelay(1);                                              /* LAT high >= 300 нс */
+    HAL_GPIO_WritePin(LAT_PORT, LAT_PIN, GPIO_PIN_RESET);
 }
 
-/* GCP: счётный клок ШИМ-декодера. По даташиту идёт пачкой в каждом цикле сетки. */
-static void gcp_burst(void)
-{
-    for (int i = 0; i < cfg.gcp; i++) {
-        HAL_GPIO_WritePin(GCP_PORT, GCP_PIN, GPIO_PIN_SET);
-        udelay(1);
-        HAL_GPIO_WritePin(GCP_PORT, GCP_PIN, GPIO_PIN_RESET);
-        udelay(1);
-    }
-}
 
-/* Сырой поток: rt бит, единицы на позициях [rs, rs+rn). Позиция = порядок ухода бита
-   в линию (0 = уходит первым). Нужен, чтобы ИЗМЕРИТЬ длину цепи и карту полей. */
-static void raw_build(void)
-{
-    if (raw.manual) return;             /* поток собран вручную командами rz/rb/rc */
-    memset(rawbuf, 0, sizeof rawbuf);
-    for (int i = raw.rs; i < raw.rs + raw.rn && i < raw.rt && i < RAW_BYTES * 8; i++)
-        rawbuf[i >> 3] |= (0x80 >> (i & 7));
-}
 
 static void rebuild(void)
 {
     for (int k = 0; k < cfg.slots; k++) build_slot(k);
-    raw_build();
     dirty = 0;
 }
 
-/* Прогон нулями — вытолкнуть из цепи всё, что там лежит (BLK держим HIGH). */
-static void flush_zeros(int nbits)
-{
-    uint8_t z[30] = {0};
-    HAL_GPIO_WritePin(BLK_PORT, BLK_PIN, GPIO_PIN_SET);
-    for (int left = nbits; left > 0; left -= 240)
-        HAL_SPI_Transmit(&hspi1, z, 30, 100);
-}
 
 /* ---------- один кадр мультиплекса ---------- */
 static void scan_frame(void)
 {
-    if (!cfg.scan) {
-        HAL_GPIO_WritePin(BLK_PORT, BLK_PIN, GPIO_PIN_SET);   /* безопасный стоп */
-        return;
-    }
-    if (raw.en) {   /* статичный сырой поток: гасим -> сдвиг rt бит -> латч -> показ */
-        blk_blank();
-        udelay(cfg.blk_us);                          /* BLK hold >= 10 мкс ДО сдвига */
-        if (bb_on) bb_send(rawbuf, raw.rt);
-        else       HAL_SPI_Transmit(&hspi1, rawbuf, (raw.rt + 7) / 8, 200);
-        udelay(1);
-        udelay(cfg.blk_us);
-        lat_pulse();
-        blk_show();
-        udelay(cfg.on_us ? cfg.on_us : 200);
-        if (cfg.hold) HAL_Delay(cfg.hold);      /* статика БЕЗ тактов CLK */
-        return;
-    }
-
-    /* mode 3 — ТОЧНАЯ последовательность из MULTIPLEX TIMING даташита:
-       сдвиг 240 бит слота (в это время светится предыдущий слот) -> пауза CLK ->
-       импульс LATCH -> импульс BLK (гашение >=10 мкс) -> пачка GCP -> следующий слот.
-       Т.е. LATCH идёт ПЕРЕД гашением, а показ = время сдвига следующего слота. */
-    if (cfg.mode == 3) {
-        for (int k = 0; k < cfg.slots; k++) {
-            if (cfg.gfix >= 0 && k != cfg.gfix) continue;
-            uint32_t t0 = DWT->CYCCNT;
-
-            if (bb_on) bb_send(slotbuf[k], cfg.bytes * 8);
-            else       HAL_SPI_Transmit(&hspi1, slotbuf[k], cfg.bytes, 100);
-
-            udelay(1);                       /* CLK -> LAT >= 250 нс */
-            lat_pulse();                     /* новые данные становятся активными */
-
-            blk_blank();                     /* импульс BLK ПОСЛЕ защёлки */
-            udelay(cfg.blk_us);              /* >= 10 мкс */
-            blk_show();
-
-            gcp_burst();
-            if (cfg.on_us) udelay(cfg.on_us);
-            slot_wait(t0);                   /* выровнять период слота */
-        }
-        return;
-    }
-
-    /* mode 2 — «гашение защёлкой»: на этой плате аноды ЗАЩЁЛКИВАЮТСЯ, а выбор сеток
-       следует за регистром вживую, поэтому сеточный бит по пути подсвечивает все
-       сетки, через которые проходит (шлейф). Лечение: сначала защёлкнуть нули в
-       аноды (поле погасло), потом вдвинуть данные слота — транзит невидим, — и
-       защёлкнуть уже финальное состояние. */
-    if (cfg.mode == 2) {
-        static const uint8_t zeros[MAX_BYTES] = {0};
-        for (int k = 0; k < cfg.slots; k++) {
-            if (cfg.gfix >= 0 && k != cfg.gfix) continue;
-
-            blk_blank();
-            udelay(cfg.blk_us);
-            if (bb_on) bb_send(zeros, cfg.bytes * 8);
-            else       HAL_SPI_Transmit(&hspi1, (uint8_t *)zeros, cfg.bytes, 100);
-            udelay(1);
-            lat_pulse();                       /* аноды = 0, поле погашено */
-
-            if (bb_on) bb_send(slotbuf[k], cfg.bytes * 8);
-            else       HAL_SPI_Transmit(&hspi1, slotbuf[k], cfg.bytes, 100);
-            udelay(1);
-            lat_pulse();                       /* финальное состояние слота */
-
-            blk_show();
-            gcp_burst();
-            if (cfg.on_us) udelay(cfg.on_us);
-        }
-        return;
-    }
-
+    /* Кадр мультиплекса, последовательность из MULTIPLEX TIMING даташита:
+       гашение -> сдвиг 240 бит слота -> LATCH -> показ. Период слота выровнен
+       по cfg.slotus, поэтому кадр из 44 слотов держит заданные 100 Гц. */
     for (int k = 0; k < cfg.slots; k++) {
-        if (cfg.gfix >= 0 && k != cfg.gfix) continue;
         uint32_t t0 = DWT->CYCCNT;
 
         if (cfg.mode == 0) {
             blk_blank();                                      /* гасим до сдвига... */
-            udelay(cfg.blk_us);                               /* ...и ДАЁМ BLK HOLD >= 10 мкс */
+            udelay(cfg.blk_us);                               /* ...BLK hold >= 10 мкс */
         }
 
-        if (bb_on) bb_send(slotbuf[k], cfg.bytes * 8);
-        else       HAL_SPI_Transmit(&hspi1, slotbuf[k], cfg.bytes, 100);
+        HAL_SPI_Transmit(&hspi1, slotbuf[k], cfg.bytes, 100);
 
         udelay(1);                                            /* CLK -> LAT >= 250 нс */
         if (cfg.mode == 1) blk_blank();
-        udelay(cfg.blk_us);                                   /* BLK hold >= 10 мкс */
+        udelay(cfg.blk_us);
         lat_pulse();
         blk_show();
-        gcp_burst();                                          /* даташит: GCP за цикл сетки */
         if (cfg.on_us) udelay(cfg.on_us);
-        slot_wait(t0);                                        /* выровнять период слота */
+        slot_wait(t0);                                        /* период слота */
     }
 }
 
-/* ---------- обратное чтение цепи по SOUT1/SOUT2 (битбенг) ---------- */
-static void so_test(int nclk)
-{
-    GPIO_InitTypeDef g = {0};
-    HAL_SPI_DeInit(&hspi1);
-    g.Mode = GPIO_MODE_OUTPUT_PP; g.Pull = GPIO_NOPULL; g.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-    g.Pin = GPIO_PIN_5 | GPIO_PIN_7; HAL_GPIO_Init(GPIOA, &g);
 
-    HAL_GPIO_WritePin(BLK_PORT, BLK_PIN, GPIO_PIN_SET);       /* скан стоит -> BLK HIGH */
-
-    /* 1) промываем цепь нулями, потом единицами — проверка самого наличия контакта */
-    for (int phase = 0; phase < 2; phase++) {
-        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, phase ? GPIO_PIN_SET : GPIO_PIN_RESET);
-        for (int i = 0; i < nclk; i++) {
-            HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);   udelay(1);
-            HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET); udelay(1);
-        }
-        upf("after %s: SO1=%d SO2=%d\r\n", phase ? "ones " : "zeros",
-            HAL_GPIO_ReadPin(SO1_PORT, SO1_PIN), HAL_GPIO_ReadPin(SO2_PORT, SO2_PIN));
-    }
-    /* вернуть нули перед измерением длины */
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_RESET);
-    for (int i = 0; i < nclk; i++) {
-        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);   udelay(1);
-        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET); udelay(1);
-    }
-    /* 2) один '1', дальше нули; ищем, на каком такте он вылезет из SOUT1/SOUT2 */
-    int f1 = -1, f2 = -1;
-    for (int i = 0; i < nclk; i++) {
-        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, (i == 0) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-        udelay(1);
-        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);   udelay(1);
-        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET); udelay(1);
-        int s1 = HAL_GPIO_ReadPin(SO1_PORT, SO1_PIN);
-        int s2 = HAL_GPIO_ReadPin(SO2_PORT, SO2_PIN);
-        if (s1 && f1 < 0) f1 = i + 1;
-        if (s2 && f2 < 0) f2 = i + 1;
-    }
-    upf("SO1 first-1 at clk %d, SO2 first-1 at clk %d (of %d)\r\n", f1, f2, nclk);
-    up(f1 < 0 && f2 < 0 ? "  -> обратка молчит: SO1/SO2 не подключены или цепь не тактируется\r\n"
-                        : "  -> длина цепи = номер такта; равные значения = SIN идёт на оба регистра\r\n");
-    SPI1_Init();
-    dirty = 1;
-}
-
-/* ---------- обратное чтение цепи по SO1: длина + целостность ----------
-   Гоним известный паттерн, потом вычитываем поток с SO1, гоня нули.
-   Смещение, на котором паттерн вылезает, = длина цепи; побитное совпадение
-   = данные доходят без потерь на текущей скорости такта (cfg bbdly). */
-static void so_read(int nbits, int write_spi)
-{
-    static uint8_t cap[80];
-    static const uint8_t pat[30] = {
-        0xA5, 0x5A, 0xFF, 0x00, 0x01, 0x80, 0x33, 0xCC, 0x0F, 0xF0,
-        0x11, 0x22, 0x44, 0x88, 0x77, 0xEE, 0x12, 0x34, 0x56, 0x78,
-        0x9A, 0xBC, 0xDE, 0xF0, 0xAA, 0x55, 0xC3, 0x3C, 0x69, 0x96 };
-    static const uint8_t zer[30] = {0};
-
-    /* если поток собран вручную (rz/rb), гоняем его — удобно для точечных тестов */
-    const uint8_t *src = raw.manual ? rawbuf : pat;
-
-    if (write_spi) {          /* пишем аппаратным SPI, читаем всё равно битбенгом */
-        if (bb_on) bb_enable(0);
-        blk_blank();
-        HAL_SPI_Transmit(&hspi1, (uint8_t *)zer, 30, 100);
-        HAL_SPI_Transmit(&hspi1, (uint8_t *)zer, 30, 100);
-        HAL_SPI_Transmit(&hspi1, (uint8_t *)src, 30, 100);
-        bb_enable(1);
-    } else {
-        if (!bb_on) bb_enable(1);
-        blk_blank();                               /* скан стоит -> BLK в гашение */
-        bb_send(zer, 240); bb_send(zer, 240);      /* промыть цепь нулями */
-        bb_send(src, 240);                         /* известный паттерн */
-    }
-
-    if (nbits > (int)sizeof(cap) * 8) nbits = sizeof(cap) * 8;
-    memset(cap, 0, sizeof cap);
-    /* Чтение делаем ЗАВЕДОМО медленно и симметрично (как в so_test, который даёт
-       стабильные 240), чтобы мерить именно надёжность ЗАПИСИ на скорости cfg.bbdly. */
-    uint32_t rd = cfg.rddly ? cfg.rddly : 2;
-    for (int i = 0; i < nbits; i++) {              /* вычитываем, гоня нули */
-        bb_set(r_dat, 0);
-        udelay(rd);
-        bb_set(r_clk, 1);
-        udelay(rd);
-        bb_set(r_clk, 0);
-        udelay(rd);
-        if (HAL_GPIO_ReadPin(SO1_PORT, SO1_PIN)) cap[i >> 3] |= (0x80 >> (i & 7));
-    }
-
-    int first = -1;
-    for (int i = 0; i < nbits; i++)
-        if (cap[i >> 3] & (0x80 >> (i & 7))) { first = i; break; }
-
-    upf("sord: bbdly=%u, вычитано %d бит, первая 1 на такте %d\r\n", cfg.bbdly, nbits, first);
-    up("sent: "); for (int i = 0; i < 30; i++) upf("%02X", src[i]); up("\r\n");
-    up("recv: "); for (int i = 0; i < (nbits + 7) / 8; i++) upf("%02X", cap[i]); up("\r\n");
-    if (first < 0) up("  -> SO1 молчит: провод не подключён либо цепь не тактируется\r\n");
-    else upf("  -> сдвиг паттерна = %d бит; если данные целы, это длина цепи\r\n", first - 0);
-    dirty = 1;
-}
 
 /* ---------- разбор команд ---------- */
 static void cfg_set(const char *k, int v)
@@ -884,21 +680,10 @@ static void cfg_set(const char *k, int v)
     else if (!strcmp(k, "miry"))   cfg.miry   = (uint8_t)v;
     else if (!strcmp(k, "rev"))    cfg.rev    = (uint8_t)v;
     else if (!strcmp(k, "bytes"))  cfg.bytes  = (v == 60) ? 60 : 30;
-    else if (!strcmp(k, "dup"))    cfg.dup    = (uint8_t)v;
     else if (!strcmp(k, "mode"))   cfg.mode   = (uint8_t)v;
     else if (!strcmp(k, "on"))     cfg.on_us  = (uint16_t)v;
     else if (!strcmp(k, "blk"))    cfg.blk_us = (uint16_t)v;
-    else if (!strcmp(k, "hold"))   cfg.hold   = (uint16_t)v;
-    else if (!strcmp(k, "blkpol")) cfg.blkpol = (uint8_t)v;
-    else if (!strcmp(k, "latpol")) cfg.latpol = (uint8_t)v;
-    else if (!strcmp(k, "nolat"))  cfg.nolat  = (uint8_t)v;
-    else if (!strcmp(k, "gcp"))    cfg.gcp    = (uint8_t)v;
-    else if (!strcmp(k, "bbdly"))  cfg.bbdly  = (uint16_t)v;
     else if (!strcmp(k, "slotus")) cfg.slotus = (uint16_t)v;
-    else if (!strcmp(k, "rtz"))    cfg.rtz    = (uint8_t)v;
-    else if (!strcmp(k, "rddly"))  cfg.rddly  = (uint16_t)v;
-    else if (!strcmp(k, "setus"))  cfg.setus  = (uint16_t)v;
-    else if (!strcmp(k, "clkns"))  cfg.clkns  = (uint16_t)v;
     else if (!strcmp(k, "revrow")) cfg.revrow = (uint8_t)v;
     else { up("cfg? \r\n"); return; }
     dirty = 1;
@@ -907,11 +692,14 @@ static void cfg_set(const char *k, int v)
 
 static void print_st(void)
 {
-    upf("slots=%d gstep=%d dbl=%d triad=%d par=%d mir=%d rev=%d bytes=%d dup=%d mode=%d on=%u blk=%u gfix=%d probe=%d scan=%d\r\n"
-        "hold=%u blkpol=%d latpol=%d nolat=%d raw=%d s=%u n=%u t=%u\r\n",
-        cfg.slots, cfg.gstep, cfg.dbl, cfg.triad, cfg.par, cfg.mir, cfg.rev,
-        cfg.bytes, cfg.dup, cfg.mode, cfg.on_us, cfg.blk_us, cfg.gfix, cfg.probe, cfg.scan,
-        cfg.hold, cfg.blkpol, cfg.latpol, cfg.nolat, raw.en, raw.rs, raw.rn, raw.rt);
+    /* двумя вызовами: в буфер upf (128 байт) обе строки сразу не влезают,
+       а обрыв на середине UTF-8 символа даёт мусор в терминале */
+    upf("slots=%d gstep=%d dbl=%d triad=%d par=%d mir=%d miry=%d rev=%d revrow=%d\r\n",
+        cfg.slots, cfg.gstep, cfg.dbl, cfg.triad, cfg.par, cfg.mir, cfg.miry,
+        cfg.rev, cfg.revrow);
+    upf("bytes=%d mode=%d on=%u blk=%u slot=%u мкс, кадр %u мкс\r\n",
+        cfg.bytes, cfg.mode, cfg.on_us, cfg.blk_us,
+        cfg.slotus, (unsigned)(cfg.slotus * cfg.slots));
 }
 
 static void handle(char *line)
@@ -920,13 +708,29 @@ static void handle(char *line)
        t1..t4 — номер строки (шрифт 5x7, 4 строки по 21 символу), cls — очистить. */
     if ((line[0] == 't' || line[0] == 'T') && line[1] >= '1' && line[1] <= '4' &&
         (line[2] == ' ' || line[2] == 0)) {
+        const font_t *f = &FONTS[font_id % 3];
+        int step = f->h + 1;
         int row = line[1] - '1';
         const char *txt = (line[2] == 0) ? "" : line + 3;
         anim = 0; demo_on = 0;
-        for (int y = row * 8; y < row * 8 + 8; y++)        /* чистим только свою строку */
+        for (int y = row * step; y < row * step + step && y < 32; y++)
             for (int x = 0; x < 128; x++) fb_set(x, 31 - y, 0);
-        fb_str180(1, row * 8, txt);
-        upf("строка %d: %s\r\n", row + 1, txt);
+        fb_text(1, row * step, txt);
+        upf("строка %d шрифтом %s: %s\r\n", row + 1, f->name, txt);
+        return;
+    }
+    /* at X Y ТЕКСТ — вывод из произвольной точки, экран не чистим */
+    if (!strncmp(line, "at ", 3)) {
+        int x = 0, y = 0, n = 0;
+        const char *q = line + 3;
+        while (*q == ' ') q++;
+        while (*q >= '0' && *q <= '9') { x = x * 10 + (*q++ - '0'); n++; }
+        while (*q == ' ') q++;
+        while (*q >= '0' && *q <= '9') { y = y * 10 + (*q++ - '0'); n++; }
+        while (*q == ' ') q++;
+        anim = 0; demo_on = 0;
+        if (n) fb_text(x, y, q);
+        upf("текст в (%d,%d): %s\r\n", x, y, q);
         return;
     }
     if (!strncmp(line, "cls", 3)) { anim = 0; demo_on = 0; fb_clear(); up("очищено\r\n"); return; }
@@ -954,7 +758,6 @@ static void handle(char *line)
     else if (!strcmp(c, "walk"))   { cube_walk = (a && a[0] == '0') ? 0 : 1;
                                      upf("блуждание=%d\r\n", cube_walk); }
     else if (!strcmp(c, "stop"))   { anim = 0; demo_on = 0; up("анимация стоп\r\n"); }
-    else if (!strcmp(c, "cross"))  { fb_clear(); fb_hline(8); fb_vline(30); up("ok\r\n"); }
     else if (!strcmp(c, "rect"))   {   /* rect X Y W H — залитый прямоугольник */
         char *e = strtok(NULL, " ");
         if (a && b && d && e) { fb_clear(); fb_rect(atoi(a), atoi(b), atoi(d), atoi(e), 1); up("ok\r\n"); }
@@ -966,71 +769,64 @@ static void handle(char *line)
         fb_rect((128 - bw) / 2, (32 - bh) / 2, bw, bh, 1);
         upf("box %dx%d в центре\r\n", bw, bh);
     }
+    else if (!strcmp(c, "time"))   {   /* time ЧЧ:ММ:СС — выставить время */
+        if (a) {
+            unsigned h = 0, m = 0, sec = 0;
+            if (sscanf(a, "%u:%u:%u", &h, &m, &sec) >= 2) {
+                clk_h = (uint8_t)(h % 24); clk_m = (uint8_t)(m % 60); clk_s = (uint8_t)(sec % 60);
+                clk_tick = HAL_GetTick();
+            }
+        }
+        upf("время %02u:%02u:%02u\r\n", clk_h, clk_m, clk_s);
+    }
+    else if (!strcmp(c, "clock"))  {   /* clock — часы с датой, clock - выключить */
+        if (a && a[0] == '-') { anim = 0; up("часы выключены\r\n"); }
+        else {
+            demo_on = 0; anim = 3; clk_tick = HAL_GetTick();
+            upf("часы %02u:%02u:%02u, дата %u %s %u\r\n", clk_h, clk_m, clk_s,
+                dt_d, MONTHS[(dt_mo - 1) % 12], dt_y);
+        }
+    }
+    else if (!strcmp(c, "date"))   {   /* date ДД.ММ.ГГГГ */
+        if (a) {
+            unsigned dd = 0, mm = 0, yy = 0;
+            if (sscanf(a, "%u.%u.%u", &dd, &mm, &yy) >= 2) {
+                dt_d = (uint8_t)(dd ? dd : 1);
+                dt_mo = (uint8_t)((mm >= 1 && mm <= 12) ? mm : 1);
+                if (yy) dt_y = (uint16_t)yy;
+            }
+        }
+        upf("дата %u %s %u\r\n", dt_d, MONTHS[(dt_mo - 1) % 12], dt_y);
+    }
+    else if (!strcmp(c, "font"))   {   /* font 0|1|2 — 5x8, 6x10, 7x13 */
+        if (a) font_id = (uint8_t)(atoi(a) % 3);
+        const font_t *f = &FONTS[font_id % 3];
+        upf("шрифт %d = %s: %d строк по %d символов\r\n", font_id, f->name,
+            32 / (f->h + 1), 128 / (f->w + 1));
+    }
+    else if (!strcmp(c, "pxc"))    {   /* pxc X Y — погасить точку */
+        if (a && b) { anim = 0; demo_on = 0; fb_set(atoi(a), 31 - atoi(b), 0); up("ok\r\n"); }
+    }
+    else if (!strcmp(c, "line"))   {   /* line X0 Y0 X1 Y1 — линия от точки до точки */
+        char *e = strtok(NULL, " ");
+        if (a && b && d && e) {
+            anim = 0; demo_on = 0;
+            int x0 = atoi(a), y0 = atoi(b), x1 = atoi(d), y1 = atoi(e);
+            fb_line(x0, 31 - y0, x1, 31 - y1);
+            upf("линия (%d,%d)-(%d,%d)\r\n", x0, y0, x1, y1);
+        } else up("line X0 Y0 X1 Y1\r\n");
+    }
     else if (!strcmp(c, "iv"))     {   /* инверсия кадра: проверка «плотная картинка резче» */
         for (int y = 0; y < 32; y++) for (int i = 0; i < 16; i++) fb[y][i] = (uint8_t)~fb[y][i];
         dirty = 1; up("ok\r\n");
     }
-    else if (!strcmp(c, "px"))     { if (a && b) { fb_set(atoi(a), atoi(b), d ? atoi(d) : 1); up("ok\r\n"); } }
-    else if (!strcmp(c, "one"))    { if (a && b) { fb_clear(); fb_set(atoi(a), atoi(b), 1); up("ok\r\n"); } }
-    else if (!strcmp(c, "str"))    { if (a) { fb_clear(); fb_str(b ? atoi(a) : 2, 12, b ? b : a); up("ok\r\n"); } }
-    else if (!strcmp(c, "text"))   { fb_clear(); fb_border(); fb_str(34, 12, "VFD TEST"); up("ok\r\n"); }
+    else if (!strcmp(c, "px"))     {   /* px X Y [0|1] — точка в видимых координатах */
+        if (a && b) { anim = 0; demo_on = 0;
+                      fb_set(atoi(a), 31 - atoi(b), d ? atoi(d) : 1); up("ok\r\n"); }
+    }
+    else if (!strcmp(c, "str"))    { if (a) { fb_clear(); fb_text(b ? atoi(a) : 2, 12, b ? b : a); up("ok\r\n"); } }
     else if (!strcmp(c, "cfg"))    { if (a && b) cfg_set(a, atoi(b)); else print_st(); }
-    else if (!strcmp(c, "gfix"))   { cfg.gfix = a ? atoi(a) : -1; upf("gfix=%d\r\n", cfg.gfix); }
-    else if (!strcmp(c, "gall"))   { cfg.gfix = -1; up("ok\r\n"); }
-    else if (!strcmp(c, "probe"))  { cfg.probe = a ? atoi(a) : -1; dirty = 1; upf("probe=%d\r\n", cfg.probe); }
-    else if (!strcmp(c, "noprobe")){ cfg.probe = -1; dirty = 1; up("ok\r\n"); }
-    else if (!strcmp(c, "scan"))   { cfg.scan = (a && a[0] == '0') ? 0 : 1; upf("scan=%d\r\n", cfg.scan); }
     else if (!strcmp(c, "ef"))     { HAL_GPIO_WritePin(EF_PORT, EF_PIN, (a && a[0] == '0') ? GPIO_PIN_RESET : GPIO_PIN_SET); up("ok\r\n"); }
-    else if (!strcmp(c, "bb"))     { bb_enable(!a || a[0] != '0'); upf("bb=%d\r\n", bb_on); }
-    else if (!strcmp(c, "adc"))    {   /* adc [N] — измерить НАПРЯЖЕНИЕ на линии через PA0 (A0).
-                                          Отвечает на вопрос из даташита: садится ли ноль
-                                          ниже VIL = 0.7 В. Провод: точка замера -> A0. */
-        int n = a ? atoi(a) : 4000;
-        if (n < 100) n = 100;
-        if (n > 20000) n = 20000;
-        __HAL_RCC_ADC1_CLK_ENABLE();
-        GPIO_InitTypeDef g = {0};
-        g.Mode = GPIO_MODE_ANALOG; g.Pull = GPIO_NOPULL; g.Pin = GPIO_PIN_0;
-        HAL_GPIO_Init(GPIOA, &g);
-        ADC1->CR2 = 0; ADC1->SQR3 = 0;              /* канал 0 = PA0 */
-        ADC1->SMPR2 = 0;                            /* 3 такта — самая быстрая выборка */
-        ADC1->CR2 |= ADC_CR2_ADON;
-        udelay(10);
-        uint32_t mn = 4095, mx = 0, sum = 0;
-        uint32_t hist_lo = 0;                       /* сколько отсчётов ниже 0.7 В */
-        for (int i = 0; i < n; i++) {
-            ADC1->CR2 |= ADC_CR2_SWSTART;
-            while (!(ADC1->SR & ADC_SR_EOC)) { }
-            uint32_t v = ADC1->DR & 0xFFF;
-            if (v < mn) mn = v;
-            if (v > mx) mx = v;
-            sum += v;
-            if (v * 3300U / 4095U < 700U) hist_lo++;
-        }
-        upf("АЦП на A0, %d отсчётов: мин %lu мВ, сред %lu мВ, макс %lu мВ\r\n", n,
-            (unsigned long)(mn * 3300U / 4095U), (unsigned long)((sum / n) * 3300U / 4095U),
-            (unsigned long)(mx * 3300U / 4095U));
-        upf("ниже VIL 0.7 В: %lu%% отсчётов (норма даташита VIL <= 0.7 В)\r\n",
-            (unsigned long)(hist_lo * 100U / n));
-    }
-    else if (!strcmp(c, "sq"))     {   /* sq [мс] — меандр на PA7 обычным GPIO, 2 кГц.
-                                          Проверяет: (1) щуп реально на PA7,
-                                          (2) умеет ли нога тянуть вниз быстро. */
-        int ms = a ? atoi(a) : 300;
-        HAL_SPI_DeInit(&hspi1);
-        GPIO_InitTypeDef g = {0};
-        g.Mode = GPIO_MODE_OUTPUT_PP; g.Pull = GPIO_NOPULL;
-        g.Speed = GPIO_SPEED_FREQ_VERY_HIGH; g.Pin = GPIO_PIN_7;
-        HAL_GPIO_Init(GPIOA, &g);
-        uint32_t t0 = HAL_GetTick();
-        while (HAL_GetTick() - t0 < (uint32_t)ms) {
-            GPIOA->BSRR = GPIO_PIN_7;        udelay(250);
-            GPIOA->BSRR = (uint32_t)GPIO_PIN_7 << 16; udelay(250);
-        }
-        GPIOA->BSRR = (uint32_t)GPIO_PIN_7 << 16;
-        SPI1_Init();
-        upf("меандр 2 кГц на PA7 %d мс, потом SPI обратно\r\n", ms);
-    }
     else if (!strcmp(c, "spd"))    {   /* spd N — делитель SPI (APB2 = 100 МГц): 8 -> 12.5 МГц */
         int n = a ? atoi(a) : 8;
         static const struct { int div; uint32_t presc; } tab[] = {
@@ -1040,31 +836,7 @@ static void handle(char *line)
             {128, SPI_BAUDRATEPRESCALER_128}, {256, SPI_BAUDRATEPRESCALER_256} };
         for (unsigned i = 0; i < sizeof tab / sizeof tab[0]; i++)
             if (tab[i].div == n) spi_presc = tab[i].presc;
-        bb_enable(0);                  /* уходим с битбенга на аппаратный SPI */
-        upf("SPI /%d = %lu Гц, bb=%d\r\n", n,
-            (unsigned long)(HAL_RCC_GetPCLK2Freq() / n), bb_on);
-    }
-    else if (!strcmp(c, "slew"))   {   /* slew 0..3: 0 = самые медленные фронты */
-        static const uint32_t sp[4] = { GPIO_SPEED_FREQ_LOW, GPIO_SPEED_FREQ_MEDIUM,
-                                        GPIO_SPEED_FREQ_HIGH, GPIO_SPEED_FREQ_VERY_HIGH };
-        int i = a ? atoi(a) : 3;
-        bb_slew = sp[i & 3];
-        bb_enable(1);
-        upf("slew=%d\r\n", i & 3);
-    }
-    else if (!strcmp(c, "perm"))   {   /* perm d c l b — роли по индексам 0=PA5 1=PA7 2=PB6 3=PB4 */
-        if (a && strlen(a) >= 4) {
-            r_dat = a[0] - '0'; r_clk = a[1] - '0'; r_lat = a[2] - '0'; r_blk = a[3] - '0';
-            if (!bb_on) bb_enable(1); else bb_set(r_clk, 0);
-        }
-        upf("perm dat=%s clk=%s lat=%s blk=%s\r\n", BBNAME[r_dat & 3], BBNAME[r_clk & 3],
-            BBNAME[r_lat & 3], BBNAME[r_blk & 3]);
-    }
-    else if (!strcmp(c, "pins"))   {   /* pins 0 = как подписано, 1 = LAT/BLK местами */
-        int sw = a ? atoi(a) : 0;
-        pin_lat = sw ? BLK_PIN : LAT_PIN;
-        pin_blk = sw ? LAT_PIN : BLK_PIN;
-        upf("pins swap=%d (lat=PB%d blk=PB%d)\r\n", sw, sw ? 4 : 6, sw ? 6 : 4);
+        upf("SPI /%d = %lu Гц\r\n", n, (unsigned long)(HAL_RCC_GetPCLK2Freq() / n));
     }
     else if (!strcmp(c, "hv"))     {   /* hv 0|1|z — PB9: логический уровень или Hi-Z */
         GPIO_InitTypeDef g = {0};
@@ -1076,48 +848,46 @@ static void handle(char *line)
             upf("hv=%c\r\n", (a && a[0] == '0') ? '0' : '1');
         }
     }
-    else if (!strcmp(c, "so"))     { so_test(a ? atoi(a) : 600); }
-    else if (!strcmp(c, "sord"))   {   /* sord [бит] [spi] — вторым словом переключаем запись на SPI */
-        so_read(a ? atoi(a) : 560, (b && b[0] == 's') ? 1 : 0);
-    }
-    else if (!strcmp(c, "raw"))    {
-        if (a) raw.rs = (uint16_t)atoi(a);
-        if (b) raw.rn = (uint16_t)atoi(b);
-        if (d) raw.rt = (uint16_t)atoi(d);
-        if (raw.rt > RAW_BYTES * 8) raw.rt = RAW_BYTES * 8;
-        raw.en = 1; raw.manual = 0; dirty = 1;   /* выходим из ручного режима rz/rb */
-        upf("raw s=%u n=%u t=%u\r\n", raw.rs, raw.rn, raw.rt);
-    }
-    else if (!strcmp(c, "noraw"))  { raw.en = 0; raw.manual = 0; dirty = 1; up("ok\r\n"); }
-    else if (!strcmp(c, "rz"))     {   /* rz [total] — обнулить поток, ручной режим */
-        if (a) raw.rt = (uint16_t)atoi(a);
-        if (raw.rt > RAW_BYTES * 8) raw.rt = RAW_BYTES * 8;
-        memset(rawbuf, 0, sizeof rawbuf);
-        raw.en = 1; raw.manual = 1;
-        upf("rz t=%u\r\n", raw.rt);
-    }
-    else if (!strcmp(c, "rb") || !strcmp(c, "rc")) {   /* rb/rc s n — взвести/сбросить биты */
-        int s0 = a ? atoi(a) : 0, n0 = b ? atoi(b) : 1, set = (c[1] == 'b');
-        for (int i = s0; i < s0 + n0 && i < RAW_BYTES * 8; i++) {
-            if (set) rawbuf[i >> 3] |=  (0x80 >> (i & 7));
-            else     rawbuf[i >> 3] &= ~(0x80 >> (i & 7));
-        }
-        raw.en = 1; raw.manual = 1;
-        up("ok\r\n");
-    }
-    else if (!strcmp(c, "flush"))  { flush_zeros(a ? atoi(a) : 960); up("ok\r\n"); }
     else if (!strcmp(c, "st"))     { print_st(); }
-    else if (!strcmp(c, "clk"))    {   /* какие частоты реально получились */
-        upf("SYSCLK=%lu HCLK=%lu PCLK1=%lu PCLK2=%lu Гц\r\n",
-            (unsigned long)HAL_RCC_GetSysClockFreq(), (unsigned long)HAL_RCC_GetHCLKFreq(),
-            (unsigned long)HAL_RCC_GetPCLK1Freq(), (unsigned long)HAL_RCC_GetPCLK2Freq());
-        upf("SystemCoreClock=%lu, флеш latency=%lu\r\n",
-            (unsigned long)SystemCoreClock, (unsigned long)(FLASH->ACR & FLASH_ACR_LATENCY));
-    }
-    else if (!strcmp(c, "help"))   {
-        up("clr fill border chk N hline Y vline X cross px X Y V one X Y str X TXT text\r\n"
-           "cfg [k v] | k: slots gstep dbl triad par mir rev bytes dup mode on blk\r\n"
-           "gfix N gall probe N noprobe scan 0|1 ef 0|1 so [nclk] st\r\n");
+    else if (!strcmp(c, "help") || !strcmp(c, "?")) {
+        up("\r\n=== MN12832L, 128x32: команды консоли (115200, Enter в конце) ===\r\n");
+        up("\r\nТЕКСТ\r\n");
+        up("  t1..t4 ТЕКСТ  печать в строку (сколько строк — зависит от шрифта)\r\n");
+        up("  at X Y ТЕКСТ  вывод из произвольной точки, экран не чистится\r\n");
+        up("  str [X] ТЕКСТ вывод текущим шрифтом с очисткой экрана\r\n");
+        up("  font 0|1|2    шрифт: 5x8 (4 строки), 6x10 (3), 7x13 (2), кириллица есть\r\n");
+        up("  cls           очистить экран\r\n");
+        up("\r\nЧАСЫ\r\n");
+        up("  time ЧЧ:ММ:СС выставить время | date ДД.ММ.ГГГГ  выставить дату\r\n");
+        up("  clock         часы крупными цифрами, снизу дата словами\r\n");
+        up("  clock -       выключить часы\r\n");
+        up("\r\nКАРТИНКИ И АНИМАЦИЯ\r\n");
+        up("  logo          логотип Wiren Board по центру | logo m  плавает по полю\r\n");
+        up("  cube [N]      вращающийся куб, N = масштаб (по умолчанию 17)\r\n");
+        up("  walk 0|1      блуждание куба по полю\r\n");
+        up("  demo 0|1      чередование куба и лого по 15 секунд\r\n");
+        up("  stop          остановить анимацию\r\n");
+        up("\r\nГРАФИКА\r\n");
+        up("  clr fill      очистить / залить всё поле | iv  инверсия кадра\r\n");
+        up("  px X Y [0|1]  точка | pxc X Y  погасить точку\r\n");
+        up("  line X0 Y0 X1 Y1  линия от точки до точки\r\n");
+        up("  hline Y       горизонтальная линия | vline X  вертикальная\r\n");
+        up("  border        рамка по краю | box [W H]  прямоугольник в центре\r\n");
+        up("  rect X Y W H  залитый прямоугольник | chk N  шахматка клеткой N\r\n");
+        up("\r\nДРАЙВ ДИСПЛЕЯ\r\n");
+        up("  st            показать конфигурацию и время кадра\r\n");
+        up("  spd N         делитель SPI от 100 МГц: 8 = 12.5 МГц\r\n");
+        up("  ef 0|1        накал | hv 0|1|z  вход HV (ни на что не влияет)\r\n");
+        up("  cfg КЛЮЧ ЗНАЧЕНИЕ:\r\n");
+        up("    mode 0|1    0 = гасим на сдвиг, 1 = латч в гашении\r\n");
+        up("    on МКС      окно показа в слоте | slotus МКС  период слота\r\n");
+        up("    blk МКС     длительность гашения (даташит >= 10)\r\n");
+        up("    slots N     слотов в кадре (44) | gstep N  шаг сеток (1)\r\n");
+        up("    dbl 0|1     пара сеток | triad/par/rev/revrow  раскладка бит\r\n");
+        up("    mir/miry    зеркало по X / по Y (на этом стенде 0 и 0)\r\n");
+        up("\r\nРАБОЧАЯ ТОЧКА (выставлена при старте): spd 8, mode 0, on 180,\r\n");
+        up("slotus 227 -> кадр 10 мс = 100 Гц. Стрелка вверх — прошлые команды.\r\n");
+        up("ОБЯЗАТЕЛЬНО: подтяжка линии SIN к земле 1 кОм, иначе биты размазываются.\r\n");
     }
     else up("?\r\n");
 }
@@ -1133,7 +903,7 @@ int main(void)
 
     /* стартовая рабочая точка стенда: SPI 12.5 МГц, кадр 10 мс = 100 Гц */
     cfg.mode = 0; cfg.mir = 0; cfg.miry = 0;
-    cfg.on_us = 180; cfg.slotus = 227;
+    cfg.on_us = 180; cfg.slotus = 227; font_id = 1;
     fb_logo();
 
     up("\r\nMN12832L datasheet-driver, 44 slots/pair-overlap, abc/def\r\n");
@@ -1153,16 +923,40 @@ int main(void)
         }
         if (anim && HAL_GetTick() - t_anim >= 40) {   /* 25 кадров в секунду */
             t_anim = HAL_GetTick();
-            if (anim == 2) { logo_move(); fb_logo_at((int)logo_x, (int)logo_y); }
+            if (anim == 3) { clock_tick(); clock_draw(); }
+            else if (anim == 2) { logo_move(); fb_logo_at((int)logo_x, (int)logo_y); }
             else { cube_ang += 0.10f; cube_move(); fb_cube(cube_ang); }
         }
         if (dirty) rebuild();
         scan_frame();
         while (rx_get(&ch)) {
-            if (ch == '\r' || ch == '\n') { if (li) { line[li] = 0; handle(line); li = 0; } up("> "); }
+            /* стрелки: ESC [ A вверх, ESC [ B вниз */
+            static uint8_t esc = 0;
+            if (ch == 27) { esc = 1; continue; }
+            if (esc == 1) { esc = (ch == '[') ? 2 : 0; continue; }
+            if (esc == 2) {
+                esc = 0;
+                if (ch == 'A' || ch == 'B') {
+                    int8_t ns = hist_sel + (ch == 'A' ? 1 : -1);
+                    if (ns < -1) ns = -1;
+                    if (ns > (int8_t)hist_cnt - 1) ns = (int8_t)hist_cnt - 1;
+                    hist_sel = ns;
+                    while (li) { up("\b \b"); li--; }          /* стираем набранное */
+                    if (hist_sel >= 0) {
+                        strncpy(line, hist[hist_sel], 39); line[39] = 0;
+                        li = (int)strlen(line);
+                        up(line);
+                    }
+                }
+                continue;
+            }
+            if (ch == '\r' || ch == '\n') {
+                if (li) { line[li] = 0; hist_add(line); handle(line); li = 0; }
+                hist_sel = -1;
+                up("> ");
+            }
             else if (ch == 8 || ch == 127) { if (li) { li--; up("\b \b"); } }
-            else if (li < 79) { line[li++] = (char)ch;
-                                HAL_UART_Transmit(&huart2, &ch, 1, 100); }
+            else if (li < 79) { line[li++] = (char)ch; tx_push((char *)&ch, 1); }
         }
     }
 }
