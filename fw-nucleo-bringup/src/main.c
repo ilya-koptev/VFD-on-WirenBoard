@@ -876,6 +876,22 @@ static void mb_set_unixtime(uint32_t t)
     dt_y = y; dt_mo = mo; dt_d = (uint8_t)(days + 1);
 }
 
+/* Обратное преобразование: свои часы и календарь -> unix-секунды UTC. Нужно,
+   чтобы контроллер видел, какое время у модуля, и замечал расхождение. */
+static uint32_t mb_get_unixtime(void)
+{
+    uint32_t days = 0;
+    for (uint16_t y = 1970; y < dt_y; y++)
+        days += (((y % 4 == 0 && y % 100 != 0) || y % 400 == 0) ? 366U : 365U);
+    for (uint8_t mo = 1; mo < dt_mo; mo++) {
+        days += MDAYS[mo - 1];
+        if (mo == 2 && ((dt_y % 4 == 0 && dt_y % 100 != 0) || dt_y % 400 == 0)) days++;
+    }
+    days += (uint32_t)(dt_d - 1);
+    int32_t local = (int32_t)(days * 86400U + clk_h * 3600U + clk_m * 60U + clk_s);
+    return (uint32_t)(local - (int32_t)mb_tz_min * 60);
+}
+
 static uint16_t mb_read_reg(uint16_t reg)
 {
     /* стандартные регистры ВБ: по ним инструменты узнают устройство */
@@ -908,12 +924,16 @@ static uint16_t mb_read_reg(uint16_t reg)
     case REGMAP_ADDR_CONTROL + 4: return cfg.on_us;
     case REGMAP_ADDR_CONTROL + 5: return fb_inverted;
 
+    /* время отдаём тем же порядком, каким принимаем: старшее слово первым */
+    case REGMAP_ADDR_TIME + 0:    return (uint16_t)(mb_get_unixtime() >> 16);
+    case REGMAP_ADDR_TIME + 1:    return (uint16_t)(mb_get_unixtime() & 0xFFFF);
     case REGMAP_ADDR_TIME + 2:    return (uint16_t)mb_tz_min;
 
     case REGMAP_ADDR_STATUS + 0:  return (uint16_t)(cfg.slotus * cfg.slots);
     case REGMAP_ADDR_STATUS + 1:  return cfg.slotus;
-    case REGMAP_ADDR_STATUS + 2:  return (uint16_t)(HAL_GetTick() / 1000U);
-    case REGMAP_ADDR_STATUS + 3:  return (uint16_t)(HAL_GetTick() / 1000U >> 16);
+    /* наработка тоже старшим словом вперёд, иначе u32 у драйвера едет на 65536 */
+    case REGMAP_ADDR_STATUS + 2:  return (uint16_t)((HAL_GetTick() / 1000U) >> 16);
+    case REGMAP_ADDR_STATUS + 3:  return (uint16_t)((HAL_GetTick() / 1000U) & 0xFFFF);
     case REGMAP_ADDR_STATUS + 4:  return mb_errors;
     default: break;
     }
