@@ -26,6 +26,7 @@ void Reset_Handler(void)
     while (1) { }
 }
 
+void USART2_IRQHandler(void)    __attribute__((weak, alias("default_handler")));
 void NMI_Handler(void)          __attribute__((weak, alias("default_handler")));
 void HardFault_Handler(void)    __attribute__((weak, alias("default_handler")));
 void MemManage_Handler(void)    __attribute__((weak, alias("default_handler")));
@@ -35,9 +36,11 @@ void SVC_Handler(void)          __attribute__((weak, alias("default_handler")));
 void DebugMon_Handler(void)     __attribute__((weak, alias("default_handler")));
 void PendSV_Handler(void)       __attribute__((weak, alias("default_handler")));
 
-/* Только системные векторы: периферийных прерываний загрузчик не использует */
+/* Системные векторы плюс те периферийные, что реально нужны. Индекс вектора =
+   16 + номер IRQ; USART2_IRQn = 38, поэтому его место — 54. Остальные нули:
+   в загрузчике периферийных прерываний нет вовсе, в приложении только консоль. */
 __attribute__((section(".isr_vector"), used))
-void (*const vector_table[])(void) = {
+void (*const vector_table[55])(void) = {
     (void (*)(void))&_estack,
     Reset_Handler,
     NMI_Handler,
@@ -51,4 +54,5 @@ void (*const vector_table[])(void) = {
     0,
     PendSV_Handler,
     SysTick_Handler,
+    [16 + 38] = USART2_IRQHandler,
 };
