@@ -782,27 +782,40 @@ static void mb_clear_all(void)
     mb_text_dirty = 1;
 }
 
-static void mb_graph_draw(void)
+/* Примитивы копятся: каждая новая запись дорисовывается ПОВЕРХ текущего кадра, а
+   не заменяет прежнюю. Поэтому рисуем их не в общей перерисовке, а по факту
+   записи — тогда несколько линий подряд складываются в картинку. Стереть всё —
+   режим 0. */
+static uint8_t mb_graph_new = 0;        /* биты полей, записанных и не нарисованных */
+
+static void mb_graph_draw_one(int g)
 {
     int v[4];
+    mb_graph[g][GRAPH_LEN] = 0;
 
-    mb_graph[0][GRAPH_LEN] = 0;
-    if (nums_parse(mb_graph[0], v, 4) == 4)
-        fb_line(v[0], 31 - v[1], v[2], 31 - v[3]);
-
-    mb_graph[1][GRAPH_LEN] = 0;
-    if (nums_parse(mb_graph[1], v, 3) == 3)
-        fb_circle(v[0], v[1], v[2]);
-
-    mb_graph[2][GRAPH_LEN] = 0;
-    if (nums_parse(mb_graph[2], v, 4) == 4) {      /* рамка по двум углам */
-        int x0 = v[0] < v[2] ? v[0] : v[2], x1 = v[0] < v[2] ? v[2] : v[0];
-        int y0 = v[1] < v[3] ? v[1] : v[3], y1 = v[1] < v[3] ? v[3] : v[1];
-        fb_line(x0, 31 - y0, x1, 31 - y0);
-        fb_line(x0, 31 - y1, x1, 31 - y1);
-        fb_line(x0, 31 - y0, x0, 31 - y1);
-        fb_line(x1, 31 - y0, x1, 31 - y1);
+    if (g == 0) {
+        if (nums_parse(mb_graph[0], v, 4) == 4)
+            fb_line(v[0], 31 - v[1], v[2], 31 - v[3]);
+    } else if (g == 1) {
+        if (nums_parse(mb_graph[1], v, 3) == 3)
+            fb_circle(v[0], v[1], v[2]);
+    } else {
+        if (nums_parse(mb_graph[2], v, 4) == 4) {   /* рамка по двум углам */
+            int x0 = v[0] < v[2] ? v[0] : v[2], x1 = v[0] < v[2] ? v[2] : v[0];
+            int y0 = v[1] < v[3] ? v[1] : v[3], y1 = v[1] < v[3] ? v[3] : v[1];
+            fb_line(x0, 31 - y0, x1, 31 - y0);
+            fb_line(x0, 31 - y1, x1, 31 - y1);
+            fb_line(x0, 31 - y0, x0, 31 - y1);
+            fb_line(x1, 31 - y0, x1, 31 - y1);
+        }
     }
+}
+
+static void mb_graph_pending(void)
+{
+    for (int g = 0; g < GRAPH_LINES; g++)
+        if (mb_graph_new & (1u << g)) mb_graph_draw_one(g);
+    if (mb_graph_new) { mb_graph_new = 0; dirty = 1; }
 }
 
 static void mb_text_redraw(void)
@@ -830,7 +843,6 @@ static void mb_text_redraw(void)
         fb_text(x, y, mb_text[ln]);
     }
     font_id = save;
-    mb_graph_draw();                    /* примитивы поверх строк */
 
     if (fb_inverted) fb_invert_now();
     dirty = 1;
@@ -1025,7 +1037,7 @@ static int mb_write_reg(uint16_t reg, uint16_t v)
         if (i == 0) memset(mb_graph[g], 0, GRAPH_LEN + 1);   /* новое значение целиком */
         mb_graph[g][i] = (char)(v >> 8);
         mb_graph[g][i + 1] = (char)(v & 0xFF);
-        mb_text_dirty = 1;
+        mb_graph_new |= (uint8_t)(1u << g);    /* дорисуем поверх, не стирая прежнее */
         return 1;
     }
     return 0;                                   /* адрес не наш */
@@ -1293,6 +1305,7 @@ static void app_loop(void)
         if (dirty) rebuild();
         scan_frame();
         if (mb_text_dirty && anim == 0) mb_text_redraw();
+        if (mb_graph_new && anim == 0) mb_graph_pending();   /* примитивы копятся */
         if (boot_request) {                       /* ответ уже в очереди — дождёмся и уйдём */
             while (uart_tx_busy()) { }
             delay_ms(2);
