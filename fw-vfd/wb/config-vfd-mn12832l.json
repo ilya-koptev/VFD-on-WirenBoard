@@ -166,7 +166,7 @@
         "address": 16,
         "type": "range",
         "min": 0,
-        "max": 5,
+        "max": 6,
         "group": "view"
       },
       {
@@ -332,7 +332,7 @@
         "Place 6": "Стр 6: X Y Font",
         "Text 7": "Строка 7",
         "Place 7": "Стр 7: X Y Font",
-        "Mode": "Режим",
+        "Mode": "Режим (6 — эквалайзер)",
         "Font": "Шрифт",
         "Digit set": "Набор цифр",
         "Invert": "Инверсия",

@@ -586,6 +586,8 @@ static uint16_t mb_unix_hi = 0;         /* старшее слово време�
 static void mb_text_redraw(void);       /* определения ниже, у буфера строк */
 static void clk_tick_reset(void);
 static void mb_clear_all(void);
+static uint8_t eq_on;                   /* режим эквалайзера, определение ниже */
+static void eq_redraw_all(void);
 
 static void fb_invert_now(void)
 {
@@ -605,6 +607,7 @@ static void fb_invert_to(int on)
 static uint16_t anim_to_mode(void)
 {
     if (demo_on) return VFD_MODE_DEMO;
+    if (eq_on) return VFD_MODE_EQ;
     switch (anim) {
     case 1:  return VFD_MODE_CUBE;
     case 2:  return VFD_MODE_LOGO;
@@ -616,6 +619,7 @@ static uint16_t anim_to_mode(void)
 static void mode_apply(uint16_t m)
 {
     demo_on = 0;
+    eq_on = 0;
     switch (m) {
     /* Режим 0 — это и есть «очистить»: гасим поле и стираем всё содержимое,
        иначе при возврате в режим текста снова вылезли бы прежние строки. */
@@ -625,6 +629,7 @@ static void mode_apply(uint16_t m)
     case VFD_MODE_LOGO:  anim = 2; break;
     case VFD_MODE_CUBE:  anim = 1; break;
     case VFD_MODE_DEMO:  demo_on = 1; anim = 1; break;
+    case VFD_MODE_EQ:    anim = 0; eq_on = 1; eq_redraw_all(); break;
     case VFD_MODE_IMAGE:                        /* окно картинки ещё не написано */
         up("режим картинки пока не реализован\r\n");
         break;
@@ -920,6 +925,33 @@ static void line_geom(int ln, int *x, int *y, int *fnt)
     }
     *y = auto_y;
     if (got < 1) *x = 0;
+}
+
+/* ---------- эквалайзер ----------
+   Значение строки читается как число 0..10 и превращается в высоту столбца.
+   Обновляется тот столбец, чья строка изменилась: гасим его полосу и рисуем
+   заново, соседние не трогаем — та же логика, что у построчного текста. */
+static void eq_update(int ln)
+{
+    if (ln < 0 || ln >= EQ_BARS) return;
+    mb_text[ln][TEXT_LEN] = 0;
+
+    int x0 = EQ_X0 + ln * EQ_PITCH;
+    fb_clear_rect(x0, 0, EQ_W, 32);
+
+    int v[1];
+    if (nums_parse(mb_text[ln], v, 1) == 1) {
+        int val = v[0] < 0 ? 0 : (v[0] > EQ_VMAX ? EQ_VMAX : v[0]);
+        int h = (val * 31 + EQ_VMAX / 2) / EQ_VMAX;      /* 0..10 -> 0..31 точек */
+        if (h > 0) fb_box_fill(x0, 0, x0 + EQ_W - 1, h - 1);
+    }
+    dirty = 1;
+}
+
+static void eq_redraw_all(void)
+{
+    fb_clear();
+    for (int ln = 0; ln < EQ_BARS; ln++) eq_update(ln);
 }
 
 static void mb_line_update(int ln)
@@ -1423,7 +1455,10 @@ static void app_loop(void)
         if (mb_text_dirty && anim == 0) mb_text_redraw();
         if (mb_text_new && anim == 0) {              /* перерисовать только изменённые строки */
             for (int ln = 0; ln < TEXT_LINES; ln++)
-                if (mb_text_new & (1u << ln)) mb_line_update(ln);
+                if (mb_text_new & (1u << ln)) {
+                    if (eq_on) eq_update(ln);
+                    else       mb_line_update(ln);
+                }
             mb_text_new = 0;
         }
         if (mb_graph_new && anim == 0) mb_graph_pending();   /* примитивы копятся */
