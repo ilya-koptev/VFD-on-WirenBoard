@@ -585,6 +585,7 @@ static uint16_t mb_unix_hi = 0;         /* старшее слово време�
 
 static void mb_text_redraw(void);       /* определения ниже, у буфера строк */
 static void clk_tick_reset(void);
+static void mb_clear_all(void);
 
 static void fb_invert_now(void)
 {
@@ -616,7 +617,9 @@ static void mode_apply(uint16_t m)
 {
     demo_on = 0;
     switch (m) {
-    case VFD_MODE_BLANK: anim = 0; fb_clear(); dirty = 1; break;
+    /* Режим 0 — это и есть «очистить»: гасим поле и стираем всё содержимое,
+       иначе при возврате в режим текста снова вылезли бы прежние строки. */
+    case VFD_MODE_BLANK: anim = 0; mb_clear_all(); fb_clear(); dirty = 1; break;
     case VFD_MODE_TEXT:  anim = 0; mb_text_redraw(); break;
     case VFD_MODE_CLOCK: anim = 3; clk_tick_reset(); break;
     case VFD_MODE_LOGO:  anim = 2; break;
@@ -754,9 +757,30 @@ static void clk_tick_reset(void) { clk_tick = systick_ms(); }
 
 /* Строки рисуем сверху вниз выбранным шрифтом. Ноль по Y у поля внизу, поэтому
    первая строка садится на 32 минус высота шрифта. */
+/* Поле из одних пробелов считаем пустым. Иначе очистить строку из интерфейса
+   нельзя: пустую посылку драйвер в устройство не пишет, и на экране остаётся
+   прежний текст. Плюс сам драйвер записывает обратно тот пробел, которым мы
+   отдаём пустое поле, чтобы контрол не исчезал из списка. */
+static int blank_only(const char *s)
+{
+    for (; *s; s++)
+        if (*s != ' ') return 0;
+    return 1;
+}
+
 /* Примитивы: линия, окружность, рамка. Числа берём из тех же текстовых полей,
    что и размещение строк, поэтому вводятся они так же свободно. */
 static char mb_graph[GRAPH_LINES][GRAPH_LEN + 1];
+
+/* Стереть всё содержимое: строки, их параметры и примитивы. Дёргается записью
+   1 в регистр очистки — в интерфейсе это кнопка. */
+static void mb_clear_all(void)
+{
+    memset(mb_text, 0, sizeof mb_text);
+    memset(mb_params, 0, sizeof mb_params);
+    memset(mb_graph, 0, sizeof mb_graph);
+    mb_text_dirty = 1;
+}
 
 static void mb_graph_draw(void)
 {
@@ -790,7 +814,7 @@ static void mb_text_redraw(void)
     for (int ln = 0; ln < TEXT_LINES; ln++) {
         mb_text[ln][TEXT_LEN] = 0;
         mb_params[ln][TEXT_PARAMS_LEN] = 0;
-        if (!mb_text[ln][0]) continue;
+        if (blank_only(mb_text[ln])) continue;      /* пробел = пусто */
 
         int x = 0, y = -1, fnt = save;
         int got = params_parse(mb_params[ln], &x, &y, &fnt);
@@ -961,6 +985,7 @@ static int mb_write_reg(uint16_t reg, uint16_t v)
     case REGMAP_ADDR_CONTROL + 3: return 1;                     /* раскладка часов сама */
     case REGMAP_ADDR_CONTROL + 4: cfg.on_us = v; dirty = 1; return 1;   /* яркость */
     case REGMAP_ADDR_CONTROL + 5: fb_invert_to(v & VFD_FLAG_INVERT); return 1;
+    case REGMAP_ADDR_CONTROL + 6: if (v) mb_clear_all(); return 1;   /* кнопка «очистить» */
 
     /* старшее слово приходит первым, применяем по приходу младшего */
     case REGMAP_ADDR_TIME + 0: mb_unix_hi = v; return 1;
