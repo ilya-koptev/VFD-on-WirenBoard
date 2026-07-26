@@ -961,7 +961,7 @@ static void eq_redraw_all(void)
         if (w < 1) w = 1;
         int x = (128 - (n * w + n - 1)) / 2;
         for (int i = 0; i < n; i++) {
-            int h = (val[i] * 31 + EQ_VMAX / 2) / EQ_VMAX;   /* 0..10 -> 0..31 */
+            int h = val[i];                     /* значение и есть высота, 0..32 */
             if (h > 0) fb_box_fill(x, 0, x + w - 1, h - 1);
             x += w + 1;
         }
