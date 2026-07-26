@@ -846,14 +846,23 @@ static uint16_t mb_read_reg(uint16_t reg)
         uint16_t off = reg - REGMAP_ADDR_TEXT1;
         uint16_t ln = off / TEXT_STRIDE, r = off % TEXT_STRIDE;
         if (ln >= TEXT_LINES) return 0;
+        /* Пустое поле отдаём одним пробелом. Причина не в железе: пустая
+           удержанная посылка удаляет топик MQTT, а интерфейс не рисует контрол
+           без значения — поля просто исчезали бы из списка. Пробел даёт топику
+           существовать, а на экране он ничего не рисует и в разборе параметров
+           чисел не даёт, поэтому строка укладывается сама. */
         if (r < TEXT_PARAMS_OFF) {
             uint16_t i = r * 2;
-            if (i + 1 < TEXT_LEN)
+            if (i + 1 < TEXT_LEN) {
+                if (i == 0 && !mb_text[ln][0]) return (uint16_t)(' ' << 8);
                 return (uint16_t)(((uint8_t)mb_text[ln][i] << 8) | (uint8_t)mb_text[ln][i + 1]);
+            }
         } else {
             uint16_t i = (uint16_t)((r - TEXT_PARAMS_OFF) * 2);
-            if (i + 1 < TEXT_PARAMS_LEN)
+            if (i + 1 < TEXT_PARAMS_LEN) {
+                if (i == 0 && !mb_params[ln][0]) return (uint16_t)(' ' << 8);
                 return (uint16_t)(((uint8_t)mb_params[ln][i] << 8) | (uint8_t)mb_params[ln][i + 1]);
+            }
         }
     }
     return 0;
