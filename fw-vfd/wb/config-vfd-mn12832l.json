@@ -7,69 +7,257 @@
     "response_timeout_ms": 300,
     "frame_timeout_ms": 20,
     "groups": [
-      { "id": "content", "title": "Text lines", "order": 1 },
-      { "id": "view", "title": "View", "order": 2 },
-      { "id": "time", "title": "Time", "order": 3 },
-      { "id": "hw", "title": "Hardware", "order": 4 }
+      {
+        "id": "content",
+        "title": "Text lines",
+        "order": 1
+      },
+      {
+        "id": "view",
+        "title": "View",
+        "order": 2
+      },
+      {
+        "id": "time",
+        "title": "Time",
+        "order": 3
+      },
+      {
+        "id": "hw",
+        "title": "Hardware",
+        "order": 4
+      }
     ],
     "channels": [
-      { "name": "Text 1", "reg_type": "holding", "address": 512,
-        "type": "text", "format": "string8", "string_data_size": 24, "group": "content" },
-      { "name": "Place 1", "reg_type": "holding", "address": 524,
-        "type": "text", "format": "string8", "string_data_size": 12, "group": "content" },
-      { "name": "Text 2", "reg_type": "holding", "address": 544,
-        "type": "text", "format": "string8", "string_data_size": 24, "group": "content" },
-      { "name": "Place 2", "reg_type": "holding", "address": 556,
-        "type": "text", "format": "string8", "string_data_size": 12, "group": "content" },
-      { "name": "Text 3", "reg_type": "holding", "address": 576,
-        "type": "text", "format": "string8", "string_data_size": 24, "group": "content" },
-      { "name": "Place 3", "reg_type": "holding", "address": 588,
-        "type": "text", "format": "string8", "string_data_size": 12, "group": "content" },
-      { "name": "Text 4", "reg_type": "holding", "address": 608,
-        "type": "text", "format": "string8", "string_data_size": 24, "group": "content" },
-      { "name": "Place 4", "reg_type": "holding", "address": 620,
-        "type": "text", "format": "string8", "string_data_size": 12, "group": "content" },
-      { "name": "Text 5", "reg_type": "holding", "address": 640,
-        "type": "text", "format": "string8", "string_data_size": 24, "group": "content" },
-      { "name": "Place 5", "reg_type": "holding", "address": 652,
-        "type": "text", "format": "string8", "string_data_size": 12, "group": "content" },
-      { "name": "Text 6", "reg_type": "holding", "address": 672,
-        "type": "text", "format": "string8", "string_data_size": 24, "group": "content" },
-      { "name": "Place 6", "reg_type": "holding", "address": 684,
-        "type": "text", "format": "string8", "string_data_size": 12, "group": "content" },
-      { "name": "Text 7", "reg_type": "holding", "address": 704,
-        "type": "text", "format": "string8", "string_data_size": 24, "group": "content" },
-      { "name": "Place 7", "reg_type": "holding", "address": 716,
-        "type": "text", "format": "string8", "string_data_size": 12, "group": "content" },
-
-      { "name": "Mode", "reg_type": "holding", "address": 16,
-        "type": "range", "min": 0, "max": 6, "group": "view" },
-      { "name": "Font", "reg_type": "holding", "address": 17,
-        "type": "range", "min": 0, "max": 2, "group": "view" },
-      { "name": "Digit set", "reg_type": "holding", "address": 18,
-        "type": "range", "min": 0, "max": 3, "group": "view" },
-      { "name": "Brightness", "reg_type": "holding", "address": 20,
-        "type": "range", "min": 0, "max": 220, "group": "view" },
-      { "name": "Invert", "reg_type": "holding", "address": 21,
-        "type": "switch", "group": "view" },
-
-      { "name": "Unix time", "reg_type": "holding", "address": 32,
-        "type": "value", "format": "u32", "group": "time" },
-      { "name": "TZ offset", "reg_type": "holding", "address": 34,
-        "type": "value", "format": "s16", "group": "time" },
-
-      { "name": "Frame time", "reg_type": "holding", "address": 48,
-        "type": "value", "readonly": true, "group": "hw" },
-      { "name": "Slot time", "reg_type": "holding", "address": 49,
-        "type": "value", "readonly": true, "group": "hw" },
-      { "name": "Uptime", "reg_type": "holding", "address": 50,
-        "type": "value", "format": "u32", "readonly": true, "group": "hw" },
-      { "name": "Bad frames", "reg_type": "holding", "address": 52,
-        "type": "value", "readonly": true, "group": "hw" },
-      { "name": "Signature", "reg_type": "holding", "address": 290,
-        "type": "text", "format": "string", "string_data_size": 12, "readonly": true, "group": "hw" },
-      { "name": "FW version", "reg_type": "holding", "address": 250,
-        "type": "text", "format": "string", "string_data_size": 8, "readonly": true, "group": "hw" }
+      {
+        "name": "Text 1",
+        "reg_type": "holding",
+        "address": 512,
+        "type": "text",
+        "format": "string8",
+        "string_data_size": 24,
+        "group": "content"
+      },
+      {
+        "name": "Place 1",
+        "reg_type": "holding",
+        "address": 524,
+        "type": "text",
+        "format": "string8",
+        "string_data_size": 12,
+        "group": "content"
+      },
+      {
+        "name": "Text 2",
+        "reg_type": "holding",
+        "address": 544,
+        "type": "text",
+        "format": "string8",
+        "string_data_size": 24,
+        "group": "content"
+      },
+      {
+        "name": "Place 2",
+        "reg_type": "holding",
+        "address": 556,
+        "type": "text",
+        "format": "string8",
+        "string_data_size": 12,
+        "group": "content"
+      },
+      {
+        "name": "Text 3",
+        "reg_type": "holding",
+        "address": 576,
+        "type": "text",
+        "format": "string8",
+        "string_data_size": 24,
+        "group": "content"
+      },
+      {
+        "name": "Place 3",
+        "reg_type": "holding",
+        "address": 588,
+        "type": "text",
+        "format": "string8",
+        "string_data_size": 12,
+        "group": "content"
+      },
+      {
+        "name": "Text 4",
+        "reg_type": "holding",
+        "address": 608,
+        "type": "text",
+        "format": "string8",
+        "string_data_size": 24,
+        "group": "content"
+      },
+      {
+        "name": "Place 4",
+        "reg_type": "holding",
+        "address": 620,
+        "type": "text",
+        "format": "string8",
+        "string_data_size": 12,
+        "group": "content"
+      },
+      {
+        "name": "Text 5",
+        "reg_type": "holding",
+        "address": 640,
+        "type": "text",
+        "format": "string8",
+        "string_data_size": 24,
+        "group": "content"
+      },
+      {
+        "name": "Place 5",
+        "reg_type": "holding",
+        "address": 652,
+        "type": "text",
+        "format": "string8",
+        "string_data_size": 12,
+        "group": "content"
+      },
+      {
+        "name": "Text 6",
+        "reg_type": "holding",
+        "address": 672,
+        "type": "text",
+        "format": "string8",
+        "string_data_size": 24,
+        "group": "content"
+      },
+      {
+        "name": "Place 6",
+        "reg_type": "holding",
+        "address": 684,
+        "type": "text",
+        "format": "string8",
+        "string_data_size": 12,
+        "group": "content"
+      },
+      {
+        "name": "Text 7",
+        "reg_type": "holding",
+        "address": 704,
+        "type": "text",
+        "format": "string8",
+        "string_data_size": 24,
+        "group": "content"
+      },
+      {
+        "name": "Place 7",
+        "reg_type": "holding",
+        "address": 716,
+        "type": "text",
+        "format": "string8",
+        "string_data_size": 12,
+        "group": "content"
+      },
+      {
+        "name": "Mode",
+        "reg_type": "holding",
+        "address": 16,
+        "type": "range",
+        "min": 0,
+        "max": 6,
+        "group": "view"
+      },
+      {
+        "name": "Font",
+        "reg_type": "holding",
+        "address": 17,
+        "type": "range",
+        "min": 0,
+        "max": 6,
+        "group": "view"
+      },
+      {
+        "name": "Digit set",
+        "reg_type": "holding",
+        "address": 18,
+        "type": "range",
+        "min": 0,
+        "max": 3,
+        "group": "view"
+      },
+      {
+        "name": "Invert",
+        "reg_type": "holding",
+        "address": 21,
+        "type": "switch",
+        "group": "view"
+      },
+      {
+        "name": "Unix time",
+        "reg_type": "holding",
+        "address": 32,
+        "type": "value",
+        "format": "u32",
+        "group": "time"
+      },
+      {
+        "name": "TZ offset",
+        "reg_type": "holding",
+        "address": 34,
+        "type": "value",
+        "format": "s16",
+        "group": "time"
+      },
+      {
+        "name": "Frame time",
+        "reg_type": "holding",
+        "address": 48,
+        "type": "value",
+        "readonly": true,
+        "group": "hw"
+      },
+      {
+        "name": "Slot time",
+        "reg_type": "holding",
+        "address": 49,
+        "type": "value",
+        "readonly": true,
+        "group": "hw"
+      },
+      {
+        "name": "Uptime",
+        "reg_type": "holding",
+        "address": 50,
+        "type": "value",
+        "format": "u32",
+        "readonly": true,
+        "group": "hw"
+      },
+      {
+        "name": "Bad frames",
+        "reg_type": "holding",
+        "address": 52,
+        "type": "value",
+        "readonly": true,
+        "group": "hw"
+      },
+      {
+        "name": "Signature",
+        "reg_type": "holding",
+        "address": 290,
+        "type": "text",
+        "format": "string",
+        "string_data_size": 12,
+        "readonly": true,
+        "group": "hw"
+      },
+      {
+        "name": "FW version",
+        "reg_type": "holding",
+        "address": 250,
+        "type": "text",
+        "format": "string",
+        "string_data_size": 8,
+        "readonly": true,
+        "group": "hw"
+      }
     ],
     "translations": {
       "ru": {
@@ -78,17 +266,23 @@
         "View": "Отображение",
         "Time": "Время",
         "Hardware": "Устройство",
-        "Text 1": "Строка 1", "Place 1": "Строка 1: X Y шрифт",
-        "Text 2": "Строка 2", "Place 2": "Строка 2: X Y шрифт",
-        "Text 3": "Строка 3", "Place 3": "Строка 3: X Y шрифт",
-        "Text 4": "Строка 4", "Place 4": "Строка 4: X Y шрифт",
-        "Text 5": "Строка 5", "Place 5": "Строка 5: X Y шрифт",
-        "Text 6": "Строка 6", "Place 6": "Строка 6: X Y шрифт",
-        "Text 7": "Строка 7", "Place 7": "Строка 7: X Y шрифт",
+        "Text 1": "Строка 1",
+        "Place 1": "Строка 1: X Y шрифт",
+        "Text 2": "Строка 2",
+        "Place 2": "Строка 2: X Y шрифт",
+        "Text 3": "Строка 3",
+        "Place 3": "Строка 3: X Y шрифт",
+        "Text 4": "Строка 4",
+        "Place 4": "Строка 4: X Y шрифт",
+        "Text 5": "Строка 5",
+        "Place 5": "Строка 5: X Y шрифт",
+        "Text 6": "Строка 6",
+        "Place 6": "Строка 6: X Y шрифт",
+        "Text 7": "Строка 7",
+        "Place 7": "Строка 7: X Y шрифт",
         "Mode": "Режим",
         "Font": "Шрифт",
         "Digit set": "Набор цифр",
-        "Brightness": "Яркость, мкс",
         "Invert": "Инверсия",
         "Unix time": "Время, unix",
         "TZ offset": "Смещение зоны, мин",

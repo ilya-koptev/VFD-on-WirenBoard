@@ -282,6 +282,36 @@ static uint8_t clk_h = 12, clk_m = 0, clk_s = 0;
 static uint32_t clk_tick = 0;               /* метка последней секунды */
 static uint8_t clk_set = 0;                 /* какой набор цифр, см. DIGITS */
 
+/* Наборы цифр доступны как обычные шрифты: 0..2 — текстовые, дальше цифровые.
+   Так большое число можно поставить в любую строку, а не только в часы. */
+#define FONT_TEXT_COUNT 3
+#define FONT_COUNT      (FONT_TEXT_COUNT + DIGITS_COUNT)
+
+static int font_height(int id)
+{
+    return (id < FONT_TEXT_COUNT) ? FONTS[id].h : DIGITS[id - FONT_TEXT_COUNT].h;
+}
+
+static const char *font_name(int id)
+{
+    return (id < FONT_TEXT_COUNT) ? FONTS[id].name : DIGITS[id - FONT_TEXT_COUNT].name;
+}
+
+/* Вывод набором цифр: знаки 0..9, двоеточие и пробел, остальное — пробел */
+static void fb_digits_set(int x, int y, const char *t, int set)
+{
+    const digits_t *d = &DIGITS[set % DIGITS_COUNT];
+    for (; *t && x < 128; t++) {
+        int gi = (*t >= '0' && *t <= '9') ? *t - '0' : (*t == ':' ? 10 : 11);
+        const uint8_t *g = d->data + (size_t)gi * d->h * d->by;
+        for (int row = 0; row < d->h; row++)
+            for (int col = 0; col < d->w; col++)
+                if ((g[row * d->by + (col >> 3)] >> (7 - (col & 7))) & 1)
+                    fb_set(x + col, 31 - (y + (d->h - 1 - row)), 1);
+        x += d->w + 1;
+    }
+}
+
 static void fb_digits(int x, int y, const char *t)
 {
     const digits_t *d = &DIGITS[clk_set];
@@ -382,6 +412,11 @@ static int fb_glyph(int x, int y, uint32_t cp)
 /* Строка UTF-8: русская буква приходит двумя байтами, разбираем на месте */
 static void fb_text(int x, int y, const char *t)
 {
+    /* шрифты 3 и дальше — наборы цифр: те же координаты, только глифы другие */
+    if (font_id >= FONT_TEXT_COUNT) {
+        fb_digits_set(x, y, t, font_id - FONT_TEXT_COUNT);
+        return;
+    }
     while (*t) {
         uint32_t cp = (uint8_t)*t++;
         if (cp >= 0xC0 && *t) {             /* двухбайтовая последовательность */
@@ -680,12 +715,11 @@ static void mb_text_redraw(void)
 
         int x = 0, y = -1, fnt = save;
         int got = params_parse(mb_params[ln], &x, &y, &fnt);
-        if (fnt < 0 || fnt > 2) fnt = save;
+        if (fnt < 0 || fnt >= FONT_COUNT) fnt = save;
         font_id = (uint8_t)fnt;
-        const font_t *f = &FONTS[fnt];
 
         if (got < 2 || y < 0) {         /* координат нет — укладываем сверху вниз */
-            auto_y -= f->h + 1;
+            auto_y -= font_height(fnt) + 1;
             if (auto_y < 0) { font_id = save; continue; }   /* поле кончилось */
             y = auto_y;
             if (got < 1) x = 0;
@@ -821,7 +855,7 @@ static int mb_write_reg(uint16_t reg, uint16_t v)
 
     switch (reg) {
     case REGMAP_ADDR_CONTROL + 0: mode_apply(v); return 1;
-    case REGMAP_ADDR_CONTROL + 1: if (v < 3) font_id = (uint8_t)v; return 1;
+    case REGMAP_ADDR_CONTROL + 1: if (v < FONT_COUNT) font_id = (uint8_t)v; return 1;
     case REGMAP_ADDR_CONTROL + 2: if (v < DIGITS_COUNT) clk_set = (uint8_t)v; return 1;
     case REGMAP_ADDR_CONTROL + 3: return 1;                     /* раскладка часов сама */
     case REGMAP_ADDR_CONTROL + 4: cfg.on_us = v; dirty = 1; return 1;   /* яркость */
@@ -1006,11 +1040,11 @@ static void handle(char *line)
         }
         upf("дата %u %s %u\r\n", dt_d, MONTHS[(dt_mo - 1) % 12], dt_y);
     }
-    else if (!strcmp(c, "font"))   {   /* font 0|1|2 — 5x8, 6x10, 7x13 */
-        if (a) font_id = (uint8_t)(atoi(a) % 3);
-        const font_t *f = &FONTS[font_id % 3];
-        upf("шрифт %d = %s: %d строк по %d символов\r\n", font_id, f->name,
-            32 / (f->h + 1), 128 / (f->w + 1));
+    else if (!strcmp(c, "font"))   {   /* font 0..6: три текстовых и наборы цифр */
+        if (a) font_id = (uint8_t)(atoi(a) % FONT_COUNT);
+        int h = font_height(font_id);
+        upf("шрифт %d = %s, высота %d%s\r\n", font_id, font_name(font_id), h,
+            font_id >= FONT_TEXT_COUNT ? " (только цифры и двоеточие)" : "");
     }
     else if (!strcmp(c, "pxc"))    {   /* pxc X Y — погасить точку */
         if (a && b) { anim = 0; demo_on = 0; fb_set(atoi(a), 31 - atoi(b), 0); up("ok\r\n"); }
