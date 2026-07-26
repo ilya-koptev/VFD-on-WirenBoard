@@ -26,6 +26,11 @@
         "id": "hw",
         "title": "Hardware",
         "order": 4
+      },
+      {
+        "id": "graph",
+        "title": "Graphics",
+        "order": 5
       }
     ],
     "channels": [
@@ -268,6 +273,33 @@
         "readonly": true,
         "group": "hw",
         "enabled": false
+      },
+      {
+        "name": "Line",
+        "reg_type": "holding",
+        "address": 768,
+        "type": "text",
+        "format": "string8",
+        "string_data_size": 16,
+        "group": "graph"
+      },
+      {
+        "name": "Circle",
+        "reg_type": "holding",
+        "address": 784,
+        "type": "text",
+        "format": "string8",
+        "string_data_size": 16,
+        "group": "graph"
+      },
+      {
+        "name": "Rect",
+        "reg_type": "holding",
+        "address": 800,
+        "type": "text",
+        "format": "string8",
+        "string_data_size": 16,
+        "group": "graph"
       }
     ],
     "translations": {
@@ -302,7 +334,11 @@
         "Uptime": "Наработка, с",
         "Bad frames": "Битых кадров",
         "Signature": "Подпись",
-        "FW version": "Версия прошивки"
+        "FW version": "Версия прошивки",
+        "Line": "Линия: X Y X Y",
+        "Circle": "Окружность: X Y диаметр",
+        "Rect": "Прямоугольник: X Y X Y",
+        "Graphics": "Графика"
       }
     }
   }

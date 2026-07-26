@@ -695,6 +695,43 @@ static uint8_t mb_text_dirty = 0;
 /* Разбор строки параметров: до трёх чисел, разделитель любой — пробел, запятая,
    точка с запятой, что угодно кроме цифр и минуса. Пропущенные числа остаются
    как были, поэтому «10 20» задаёт только координаты, а «,,2» — только шрифт. */
+/* Разбор до max чисел из строки; разделитель любой, минус учитывается */
+static int nums_parse(const char *s, int *out, int max)
+{
+    int got = 0;
+    while (*s && got < max) {
+        while (*s && *s != '-' && (*s < '0' || *s > '9')) s++;
+        if (!*s) break;
+        int sign = 1;
+        if (*s == '-') { sign = -1; s++; }
+        if (*s < '0' || *s > '9') continue;
+        int v = 0;
+        while (*s >= '0' && *s <= '9') v = v * 10 + (*s++ - '0');
+        out[got++] = sign * v;
+    }
+    return got;
+}
+
+/* Окружность по середине точки: рисуем контур, заливка тут не нужна */
+static void fb_circle(int cx, int cy, int d)
+{
+    int r = d / 2;
+    if (r < 1) { fb_set(cx, 31 - cy, 1); return; }
+    int x = r, y = 0, err = 1 - r;
+    while (x >= y) {
+        const int pts[8][2] = { { cx + x, cy + y }, { cx + y, cy + x },
+                                { cx - y, cy + x }, { cx - x, cy + y },
+                                { cx - x, cy - y }, { cx - y, cy - x },
+                                { cx + y, cy - x }, { cx + x, cy - y } };
+        for (int i = 0; i < 8; i++)
+            if (pts[i][0] >= 0 && pts[i][0] < 128 && pts[i][1] >= 0 && pts[i][1] < 32)
+                fb_set(pts[i][0], 31 - pts[i][1], 1);
+        y++;
+        if (err < 0) err += 2 * y + 1;
+        else { x--; err += 2 * (y - x) + 1; }
+    }
+}
+
 static int params_parse(const char *s, int *x, int *y, int *font)
 {
     int *out[3] = { x, y, font };
@@ -717,6 +754,33 @@ static void clk_tick_reset(void) { clk_tick = systick_ms(); }
 
 /* Строки рисуем сверху вниз выбранным шрифтом. Ноль по Y у поля внизу, поэтому
    первая строка садится на 32 минус высота шрифта. */
+/* Примитивы: линия, окружность, рамка. Числа берём из тех же текстовых полей,
+   что и размещение строк, поэтому вводятся они так же свободно. */
+static char mb_graph[GRAPH_LINES][GRAPH_LEN + 1];
+
+static void mb_graph_draw(void)
+{
+    int v[4];
+
+    mb_graph[0][GRAPH_LEN] = 0;
+    if (nums_parse(mb_graph[0], v, 4) == 4)
+        fb_line(v[0], 31 - v[1], v[2], 31 - v[3]);
+
+    mb_graph[1][GRAPH_LEN] = 0;
+    if (nums_parse(mb_graph[1], v, 3) == 3)
+        fb_circle(v[0], v[1], v[2]);
+
+    mb_graph[2][GRAPH_LEN] = 0;
+    if (nums_parse(mb_graph[2], v, 4) == 4) {      /* рамка по двум углам */
+        int x0 = v[0] < v[2] ? v[0] : v[2], x1 = v[0] < v[2] ? v[2] : v[0];
+        int y0 = v[1] < v[3] ? v[1] : v[3], y1 = v[1] < v[3] ? v[3] : v[1];
+        fb_line(x0, 31 - y0, x1, 31 - y0);
+        fb_line(x0, 31 - y1, x1, 31 - y1);
+        fb_line(x0, 31 - y0, x0, 31 - y1);
+        fb_line(x1, 31 - y0, x1, 31 - y1);
+    }
+}
+
 static void mb_text_redraw(void)
 {
     uint8_t save = font_id;
@@ -742,6 +806,7 @@ static void mb_text_redraw(void)
         fb_text(x, y, mb_text[ln]);
     }
     font_id = save;
+    mb_graph_draw();                    /* примитивы поверх строк */
 
     if (fb_inverted) fb_invert_now();
     dirty = 1;
@@ -865,6 +930,16 @@ static uint16_t mb_read_reg(uint16_t reg)
             }
         }
     }
+
+    /* примитивы: три поля по 16 байт, пустое отдаём пробелом, как и строки */
+    if (reg >= REGMAP_ADDR_LINE && reg < REGMAP_ADDR_LINE + GRAPH_LINES * 0x10) {
+        uint16_t g = (uint16_t)((reg - REGMAP_ADDR_LINE) / 0x10);
+        uint16_t i = (uint16_t)(((reg - REGMAP_ADDR_LINE) % 0x10) * 2);
+        if (g < GRAPH_LINES && i + 1 < GRAPH_LEN) {
+            if (i == 0 && !mb_graph[g][0]) return (uint16_t)(' ' << 8);
+            return (uint16_t)(((uint8_t)mb_graph[g][i] << 8) | (uint8_t)mb_graph[g][i + 1]);
+        }
+    }
     return 0;
 }
 
@@ -914,6 +989,17 @@ static int mb_write_reg(uint16_t reg, uint16_t v)
             mb_params[ln][i] = (char)(v >> 8);
             mb_params[ln][i + 1] = (char)(v & 0xFF);
         }
+        mb_text_dirty = 1;
+        return 1;
+    }
+
+    if (reg >= REGMAP_ADDR_LINE && reg < REGMAP_ADDR_LINE + GRAPH_LINES * 0x10) {
+        uint16_t g = (uint16_t)((reg - REGMAP_ADDR_LINE) / 0x10);
+        uint16_t i = (uint16_t)(((reg - REGMAP_ADDR_LINE) % 0x10) * 2);
+        if (g >= GRAPH_LINES || i + 1 >= GRAPH_LEN) return 0;
+        if (i == 0) memset(mb_graph[g], 0, GRAPH_LEN + 1);   /* новое значение целиком */
+        mb_graph[g][i] = (char)(v >> 8);
+        mb_graph[g][i + 1] = (char)(v & 0xFF);
         mb_text_dirty = 1;
         return 1;
     }
