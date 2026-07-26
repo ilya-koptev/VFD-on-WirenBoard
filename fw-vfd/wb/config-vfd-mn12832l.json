@@ -180,14 +180,16 @@
         "type": "range",
         "min": 0,
         "max": 3,
-        "group": "view"
+        "group": "view",
+        "enabled": false
       },
       {
         "name": "Invert",
         "reg_type": "holding",
         "address": 21,
         "type": "switch",
-        "group": "view"
+        "group": "view",
+        "enabled": false
       },
       {
         "name": "Unix time",
@@ -195,7 +197,8 @@
         "address": 32,
         "type": "value",
         "format": "u32",
-        "group": "time"
+        "group": "time",
+        "enabled": false
       },
       {
         "name": "TZ offset",
@@ -203,7 +206,8 @@
         "address": 34,
         "type": "value",
         "format": "s16",
-        "group": "time"
+        "group": "time",
+        "enabled": false
       },
       {
         "name": "Frame time",
@@ -211,7 +215,8 @@
         "address": 48,
         "type": "value",
         "readonly": true,
-        "group": "hw"
+        "group": "hw",
+        "enabled": false
       },
       {
         "name": "Slot time",
@@ -219,7 +224,8 @@
         "address": 49,
         "type": "value",
         "readonly": true,
-        "group": "hw"
+        "group": "hw",
+        "enabled": false
       },
       {
         "name": "Uptime",
@@ -228,7 +234,8 @@
         "type": "value",
         "format": "u32",
         "readonly": true,
-        "group": "hw"
+        "group": "hw",
+        "enabled": false
       },
       {
         "name": "Bad frames",
@@ -236,7 +243,8 @@
         "address": 52,
         "type": "value",
         "readonly": true,
-        "group": "hw"
+        "group": "hw",
+        "enabled": false
       },
       {
         "name": "Signature",
@@ -246,7 +254,8 @@
         "format": "string",
         "string_data_size": 12,
         "readonly": true,
-        "group": "hw"
+        "group": "hw",
+        "enabled": false
       },
       {
         "name": "FW version",
@@ -256,7 +265,8 @@
         "format": "string",
         "string_data_size": 8,
         "readonly": true,
-        "group": "hw"
+        "group": "hw",
+        "enabled": false
       }
     ],
     "translations": {
