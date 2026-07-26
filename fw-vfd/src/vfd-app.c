@@ -804,6 +804,9 @@ static void mb_graph_draw_one(int g)
     } else if (g == 1) {
         if (nums_parse(mb_graph[1], v, 3) == 3)
             fb_circle(v[0], v[1], v[2]);
+    } else if (g == 3) {
+        int n = nums_parse(mb_graph[3], v, 3);      /* точка: третье число 0 гасит */
+        if (n >= 2) fb_set(v[0], 31 - v[1], (n >= 3 && v[2] == 0) ? 0 : 1);
     } else {
         if (nums_parse(mb_graph[2], v, 4) == 4) {   /* рамка по двум углам */
             int x0 = v[0] < v[2] ? v[0] : v[2], x1 = v[0] < v[2] ? v[2] : v[0];
