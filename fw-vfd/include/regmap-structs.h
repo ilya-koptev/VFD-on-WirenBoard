@@ -35,10 +35,18 @@
 #define IMG_STRIDE  (IMG_W / 8)
 #define IMG_BYTES   (IMG_STRIDE * IMG_H)
 
-/* Строка текста: 24 символа = 12 регистров. Хватает самому мелкому шрифту 5x8,
-   у которого в строке укладывается 21 символ. */
-#define TEXT_LEN    24
-#define TEXT_LINES  4
+/* Строка текста: 24 БАЙТА = 12 регистров. Латиницей это 24 знака, кириллицей 12:
+   в UTF-8 русская буква занимает два байта.
+
+   Строк семь. На поле высотой 32 точки сами по себе укладываются три-четыре
+   (смотря по шрифту), остальные существуют ради произвольных координат: строку
+   можно поставить куда угодно, в том числе поверх другой или с уходом за край. */
+#define TEXT_LEN         24
+#define TEXT_LINES       7
+
+/* Параметры строки: «X Y шрифт» текстом, 12 байт с запасом на «127 31 2». */
+#define TEXT_PARAMS_LEN  12
+#define TEXT_PARAMS_OFF  12     /* смещение параметров внутри строки, регистров */
 
 /* Порция окна за одну транзакцию: 64 регистра = 128 байт. Всё окно — 16 таких
    транзакций, ~0.4 с на 115200. Делается один раз, дальше картинка живёт в МК. */
@@ -131,18 +139,37 @@ enum vfd_clock_layout {
                     }; \
         /* 0x34 */  uint16_t modbus_errors;         /* битые кадры на шине */ \
     ) \
-    /*     Адрес    Имя             RO/RW  — четыре строки по 24 символа */ \
-    m(     0x40,    TEXT1,          RW, \
-        /* 0x40 */  char text[TEXT_LEN]; \
+    /*     Адрес    Имя             RO/RW  — семь строк, шаг 0x20 регистров. \
+       В каждой: сам текст и рядом строка параметров «X Y шрифт». Параметры \
+       разбираются по любому разделителю: пробел, запятая, точка с запятой. \
+       Пусто — строка укладывается сама, сверху вниз, текущим шрифтом. */ \
+    m(     0x200,   TEXT1,          RW, \
+        /* 0x200 */ char text[TEXT_LEN]; \
+        /* 0x20C */ char params[TEXT_PARAMS_LEN]; \
     ) \
-    m(     0x50,    TEXT2,          RW, \
-        /* 0x50 */  char text[TEXT_LEN]; \
+    m(     0x220,   TEXT2,          RW, \
+                    char text[TEXT_LEN]; \
+                    char params[TEXT_PARAMS_LEN]; \
     ) \
-    m(     0x60,    TEXT3,          RW, \
-        /* 0x60 */  char text[TEXT_LEN]; \
+    m(     0x240,   TEXT3,          RW, \
+                    char text[TEXT_LEN]; \
+                    char params[TEXT_PARAMS_LEN]; \
     ) \
-    m(     0x70,    TEXT4,          RW, \
-        /* 0x70 */  char text[TEXT_LEN]; \
+    m(     0x260,   TEXT4,          RW, \
+                    char text[TEXT_LEN]; \
+                    char params[TEXT_PARAMS_LEN]; \
+    ) \
+    m(     0x280,   TEXT5,          RW, \
+                    char text[TEXT_LEN]; \
+                    char params[TEXT_PARAMS_LEN]; \
+    ) \
+    m(     0x2A0,   TEXT6,          RW, \
+                    char text[TEXT_LEN]; \
+                    char params[TEXT_PARAMS_LEN]; \
+    ) \
+    m(     0x2C0,   TEXT7,          RW, \
+                    char text[TEXT_LEN]; \
+                    char params[TEXT_PARAMS_LEN]; \
     ) \
     /*     Адрес    Имя             RO/RW  — картинка 256x64: вдвое больше поля, */ \
     /*                                       поэтому может плавать и вылезать за края */ \

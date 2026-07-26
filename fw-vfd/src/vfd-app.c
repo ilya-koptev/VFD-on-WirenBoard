@@ -639,7 +639,29 @@ static void mb_exception(uint8_t fn, uint8_t code)
 /* Строки текста живут в своём буфере: контроллер пишет их регистрами, а рисуем
    мы по своему такту, чтобы не рвать кадр посреди приёма. */
 static char mb_text[TEXT_LINES][TEXT_LEN + 1];
+static char mb_params[TEXT_LINES][TEXT_PARAMS_LEN + 1];
 static uint8_t mb_text_dirty = 0;
+
+/* Разбор строки параметров: до трёх чисел, разделитель любой — пробел, запятая,
+   точка с запятой, что угодно кроме цифр и минуса. Пропущенные числа остаются
+   как были, поэтому «10 20» задаёт только координаты, а «,,2» — только шрифт. */
+static int params_parse(const char *s, int *x, int *y, int *font)
+{
+    int *out[3] = { x, y, font };
+    int got = 0;
+    while (*s && got < 3) {
+        while (*s && *s != '-' && (*s < '0' || *s > '9')) s++;
+        if (!*s) break;
+        int sign = 1;
+        if (*s == '-') { sign = -1; s++; }
+        if (*s < '0' || *s > '9') continue;
+        int v = 0;
+        while (*s >= '0' && *s <= '9') v = v * 10 + (*s++ - '0');
+        *out[got] = sign * v;
+        got++;
+    }
+    return got;                             /* сколько чисел реально задано */
+}
 
 static void clk_tick_reset(void) { clk_tick = systick_ms(); }
 
@@ -647,15 +669,31 @@ static void clk_tick_reset(void) { clk_tick = systick_ms(); }
    первая строка садится на 32 минус высота шрифта. */
 static void mb_text_redraw(void)
 {
-    const font_t *f = &FONTS[font_id % 3];
-    int step = f->h + 1;
+    uint8_t save = font_id;
+    int auto_y = 32;                    /* курсор автоукладки: ноль поля внизу */
+
     fb_clear();
     for (int ln = 0; ln < TEXT_LINES; ln++) {
-        int y = 32 - step * (ln + 1) + 1;
-        if (y < 0) break;
         mb_text[ln][TEXT_LEN] = 0;
-        if (mb_text[ln][0]) fb_text(0, y, mb_text[ln]);
+        mb_params[ln][TEXT_PARAMS_LEN] = 0;
+        if (!mb_text[ln][0]) continue;
+
+        int x = 0, y = -1, fnt = save;
+        int got = params_parse(mb_params[ln], &x, &y, &fnt);
+        if (fnt < 0 || fnt > 2) fnt = save;
+        font_id = (uint8_t)fnt;
+        const font_t *f = &FONTS[fnt];
+
+        if (got < 2 || y < 0) {         /* координат нет — укладываем сверху вниз */
+            auto_y -= f->h + 1;
+            if (auto_y < 0) { font_id = save; continue; }   /* поле кончилось */
+            y = auto_y;
+            if (got < 1) x = 0;
+        }
+        fb_text(x, y, mb_text[ln]);
     }
+    font_id = save;
+
     if (fb_inverted) fb_invert_now();
     dirty = 1;
     mb_text_dirty = 0;
@@ -754,12 +792,20 @@ static uint16_t mb_read_reg(uint16_t reg)
     default: break;
     }
 
-    /* строки текста: по два символа в регистре */
+    /* строки текста: по два символа в регистре, за текстом — параметры строки */
     if (reg >= REGMAP_ADDR_TEXT1 && reg < REGMAP_ADDR_TEXT1 + TEXT_LINES * TEXT_STRIDE) {
         uint16_t off = reg - REGMAP_ADDR_TEXT1;
-        uint16_t ln = off / TEXT_STRIDE, i = (off % TEXT_STRIDE) * 2;
-        if (ln < TEXT_LINES && i + 1 < TEXT_LEN)
-            return (uint16_t)(((uint8_t)mb_text[ln][i] << 8) | (uint8_t)mb_text[ln][i + 1]);
+        uint16_t ln = off / TEXT_STRIDE, r = off % TEXT_STRIDE;
+        if (ln >= TEXT_LINES) return 0;
+        if (r < TEXT_PARAMS_OFF) {
+            uint16_t i = r * 2;
+            if (i + 1 < TEXT_LEN)
+                return (uint16_t)(((uint8_t)mb_text[ln][i] << 8) | (uint8_t)mb_text[ln][i + 1]);
+        } else {
+            uint16_t i = (uint16_t)((r - TEXT_PARAMS_OFF) * 2);
+            if (i + 1 < TEXT_PARAMS_LEN)
+                return (uint16_t)(((uint8_t)mb_params[ln][i] << 8) | (uint8_t)mb_params[ln][i + 1]);
+        }
     }
     return 0;
 }
@@ -790,13 +836,26 @@ static int mb_write_reg(uint16_t reg, uint16_t v)
 
     if (reg >= REGMAP_ADDR_TEXT1 && reg < REGMAP_ADDR_TEXT1 + TEXT_LINES * TEXT_STRIDE) {
         uint16_t off = reg - REGMAP_ADDR_TEXT1;
-        uint16_t ln = off / TEXT_STRIDE, i = (off % TEXT_STRIDE) * 2;
-        if (ln < TEXT_LINES && i + 1 < TEXT_LEN) {
+        uint16_t ln = off / TEXT_STRIDE, r = off % TEXT_STRIDE;
+        if (ln >= TEXT_LINES) return 0;
+        /* Запись в первый регистр = новое значение целиком: драйвер передаёт
+           только нужные ему регистры, и без очистки остаётся хвост от прошлой
+           строки, а на кириллице ещё и рвётся UTF-8. */
+        if (r < TEXT_PARAMS_OFF) {
+            uint16_t i = r * 2;
+            if (i + 1 >= TEXT_LEN) return 0;
+            if (i == 0) memset(mb_text[ln], 0, TEXT_LEN + 1);
             mb_text[ln][i] = (char)(v >> 8);
             mb_text[ln][i + 1] = (char)(v & 0xFF);
-            mb_text_dirty = 1;
-            return 1;
+        } else {
+            uint16_t i = (uint16_t)((r - TEXT_PARAMS_OFF) * 2);
+            if (i + 1 >= TEXT_PARAMS_LEN) return 0;
+            if (i == 0) memset(mb_params[ln], 0, TEXT_PARAMS_LEN + 1);
+            mb_params[ln][i] = (char)(v >> 8);
+            mb_params[ln][i + 1] = (char)(v & 0xFF);
         }
+        mb_text_dirty = 1;
+        return 1;
     }
     return 0;                                   /* адрес не наш */
 }
