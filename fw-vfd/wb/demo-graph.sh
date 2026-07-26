@@ -89,7 +89,7 @@ while [ "$pass" -lt "$PASSES" ]; do
         pub "Text 1" "$(echo "$V" | tr . ,)"
         pub "Text 2" "$(echo "$A" | tr . ,)"
 
-        sleep 0.25
+        sleep 0.12
         x=$((x + STEP))
         i=$((i + 1))
     done
