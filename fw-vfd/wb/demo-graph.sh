@@ -45,8 +45,8 @@ while [ "$pass" -lt "$PASSES" ]; do
     # отдельные строки 6 и 7 — они статичны и перерисовке не мешают.
     pub "Place 1" "2 18 2"
     pub "Place 2" "2 2 2"
-    pub "Place 6" "34 20 0"
-    pub "Place 7" "34 4 0"
+    pub "Place 6" "34 18 0"     # единица по низу числа: общая базовая линия
+    pub "Place 7" "34 2 0"
     pub "Text 6" "В"
     pub "Text 7" "А"
 
