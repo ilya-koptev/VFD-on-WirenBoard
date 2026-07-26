@@ -25,6 +25,26 @@
 #define MB_ERR_ILLEGAL_VALUE    0x03    /* EMBXILVAL */
 #define MB_ERR_SLAVE_FAILURE    0x04    /* EMBXSFAIL: не та подпись */
 
+/* ---------- безопасное состояние стекла ----------
+   Даташит: при остановке скана с поданным VDD2 удерживать BLK в гашении. После
+   сброса выводы МК висят в воздухе, стекло светит тем, что осталось в регистре,
+   ток модуля подскакивает и просаживает 5 В — а от этих же 5 В питается ST-Link,
+   который на просадке терял USB. Поэтому гашение включаем первым делом, до всего
+   остального, и держим его всё время работы загрузчика. Накал тоже глушим: во
+   время обновления показывать нечего, а ток экономим. */
+#define BLK_GPIO    GPIOB
+#define BLK_PIN_NO  4       /* PB4, HIGH = гашение */
+#define EF_PIN_NO   8       /* PB8, HIGH = накал */
+
+static void glass_safe_state(void)
+{
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOBEN;
+    BLK_GPIO->BSRR = (1U << BLK_PIN_NO);                    /* сначала уровень... */
+    BLK_GPIO->BSRR = (uint32_t)(1U << EF_PIN_NO) << 16;     /* ...накал выключен */
+    BLK_GPIO->MODER &= ~((3U << (BLK_PIN_NO * 2)) | (3U << (EF_PIN_NO * 2)));
+    BLK_GPIO->MODER |= (1U << (BLK_PIN_NO * 2)) | (1U << (EF_PIN_NO * 2));  /* ...потом выход */
+}
+
 /* ---------- часы и микросекундный счётчик ---------- */
 static volatile uint32_t ms_ticks;
 
@@ -328,6 +348,8 @@ static int handle_frame(const uint8_t *req, int len, uint8_t *out)
 /* ---------- главный цикл ---------- */
 int main(void)
 {
+    glass_safe_state();     /* прежде всего погасить стекло: см. комментарий выше */
+
     volatile uint32_t *magic = (volatile uint32_t *)BOOT_MAGIC_ADDR;
     uint32_t req_magic = *magic;
     *magic = 0;

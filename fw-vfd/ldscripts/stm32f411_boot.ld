@@ -24,8 +24,6 @@ SECTIONS
         . = ALIGN(4);
     } > FLASH
 
-    _sidata = LOADADDR(.data);
-
     .data :
     {
         _sdata = .;
@@ -33,6 +31,11 @@ SECTIONS
         . = ALIGN(4);
         _edata = .;
     } > RAM AT > FLASH
+
+    /* Адрес образа .data во флеше берём ПОСЛЕ объявления секции: до неё
+       LOADADDR даёт ноль, и стартовый код копировал бы данные из мусора.
+       Сейчас .data пуста, поэтому вреда не было, но мина осталась бы. */
+    _sidata = LOADADDR(.data);
 
     .bss (NOLOAD) :
     {
