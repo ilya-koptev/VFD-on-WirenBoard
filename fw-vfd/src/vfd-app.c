@@ -787,6 +787,38 @@ static void mb_clear_all(void)
     mb_text_dirty = 1;
 }
 
+/* Толстая линия: рисуем несколько параллельных со сдвигом поперёк главной оси.
+   Для монохромного поля этого достаточно, скосов и сглаживания тут не бывает. */
+static void fb_line_thick(int x0, int y0, int x1, int y1, int w)
+{
+    if (w < 1) w = 1;
+    int steep = (abs(x1 - x0) < abs(y1 - y0));
+    for (int k = 0; k < w; k++) {
+        int off = k - (w - 1) / 2;
+        if (steep) fb_line(x0 + off, y0, x1 + off, y1);
+        else       fb_line(x0, y0 + off, x1, y1 + off);
+    }
+}
+
+/* Залитый круг: по строкам, полуширина из теоремы Пифагора */
+static void fb_disc(int cx, int cy, int d)
+{
+    int r = d / 2;
+    for (int dy = -r; dy <= r; dy++) {
+        int y = cy + dy;
+        if (y < 0 || y > 31) continue;
+        int dx = (int)(sqrtf((float)(r * r - dy * dy)) + 0.5f);
+        fb_line(cx - dx, 31 - y, cx + dx, 31 - y);
+    }
+}
+
+static void fb_box_fill(int x0, int y0, int x1, int y1)
+{
+    for (int y = y0; y <= y1; y++)
+        for (int x = x0; x <= x1; x++)
+            if (x >= 0 && x < 128 && y >= 0 && y < 32) fb_set(x, 31 - y, 1);
+}
+
 /* Примитивы копятся: каждая новая запись дорисовывается ПОВЕРХ текущего кадра, а
    не заменяет прежнюю. Поэтому рисуем их не в общей перерисовке, а по факту
    записи — тогда несколько линий подряд складываются в картинку. Стереть всё —
@@ -795,26 +827,32 @@ static uint8_t mb_graph_new = 0;        /* биты полей, записанн
 
 static void mb_graph_draw_one(int g)
 {
-    int v[4];
+    int v[5];
     mb_graph[g][GRAPH_LEN] = 0;
+    int n = nums_parse(mb_graph[g], v, 5);
 
-    if (g == 0) {
-        if (nums_parse(mb_graph[0], v, 4) == 4)
-            fb_line(v[0], 31 - v[1], v[2], 31 - v[3]);
-    } else if (g == 1) {
-        if (nums_parse(mb_graph[1], v, 3) == 3)
-            fb_circle(v[0], v[1], v[2]);
-    } else if (g == 3) {
-        int n = nums_parse(mb_graph[3], v, 3);      /* точка: третье число 0 гасит */
+    if (g == 0) {                                   /* линия: X Y X Y [толщина] */
+        if (n >= 4) fb_line_thick(v[0], 31 - v[1], v[2], 31 - v[3],
+                                  n >= 5 ? v[4] : 1);
+    } else if (g == 1) {                            /* окружность: X Y D [залить] */
+        if (n >= 3) {
+            if (n >= 4 && v[3]) fb_disc(v[0], v[1], v[2]);
+            else                fb_circle(v[0], v[1], v[2]);
+        }
+    } else if (g == 3) {                            /* точка: X Y [0 гасит] */
         if (n >= 2) fb_set(v[0], 31 - v[1], (n >= 3 && v[2] == 0) ? 0 : 1);
-    } else {
-        if (nums_parse(mb_graph[2], v, 4) == 4) {   /* рамка по двум углам */
+    } else {                                        /* прямоугольник: X Y X Y [залить] */
+        if (n >= 4) {
             int x0 = v[0] < v[2] ? v[0] : v[2], x1 = v[0] < v[2] ? v[2] : v[0];
             int y0 = v[1] < v[3] ? v[1] : v[3], y1 = v[1] < v[3] ? v[3] : v[1];
-            fb_line(x0, 31 - y0, x1, 31 - y0);
-            fb_line(x0, 31 - y1, x1, 31 - y1);
-            fb_line(x0, 31 - y0, x0, 31 - y1);
-            fb_line(x1, 31 - y0, x1, 31 - y1);
+            if (n >= 5 && v[4]) {
+                fb_box_fill(x0, y0, x1, y1);
+            } else {
+                fb_line(x0, 31 - y0, x1, 31 - y0);
+                fb_line(x0, 31 - y1, x1, 31 - y1);
+                fb_line(x0, 31 - y0, x0, 31 - y1);
+                fb_line(x1, 31 - y0, x1, 31 - y1);
+            }
         }
     }
 }
