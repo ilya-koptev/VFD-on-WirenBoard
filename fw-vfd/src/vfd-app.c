@@ -282,6 +282,18 @@ static uint8_t clk_h = 12, clk_m = 0, clk_s = 0;
 static uint32_t clk_tick = 0;               /* метка последней секунды */
 static uint8_t clk_set = 0;                 /* какой набор цифр, см. DIGITS */
 
+/* Индекс глифа крупного набора по символу. Порядок задан DIGIT_CHARS в
+   digits.h, поэтому набор и код не могут разъехаться. Знак градуса приходит в
+   UTF-8 двумя байтами (0xC2 0xB0) — съедаем второй сами. Неизвестный знак
+   выводим пробелом: в наборах только цифры и знаки при них. */
+static int digit_glyph(const char **pt)
+{
+    const unsigned char *p = (const unsigned char *)*pt;
+    if (p[0] == 0xC2 && p[1] == 0xB0) { (*pt)++; return DIGIT_DEGREE_INDEX; }
+    const char *q = strchr(DIGIT_CHARS, (char)p[0]);
+    return (q && *q) ? (int)(q - DIGIT_CHARS) : DIGIT_SPACE_INDEX;
+}
+
 /* Наборы цифр доступны как обычные шрифты: 0..2 — текстовые, дальше цифровые.
    Так большое число можно поставить в любую строку, а не только в часы. */
 #define FONT_TEXT_COUNT 3
@@ -302,7 +314,7 @@ static void fb_digits_set(int x, int y, const char *t, int set)
 {
     const digits_t *d = &DIGITS[set % DIGITS_COUNT];
     for (; *t && x < 128; t++) {
-        int gi = (*t >= '0' && *t <= '9') ? *t - '0' : (*t == ':' ? 10 : 11);
+        int gi = digit_glyph(&t);
         const uint8_t *g = d->data + (size_t)gi * d->h * d->by;
         for (int row = 0; row < d->h; row++)
             for (int col = 0; col < d->w; col++)
@@ -316,7 +328,7 @@ static void fb_digits(int x, int y, const char *t)
 {
     const digits_t *d = &DIGITS[clk_set];
     for (; *t && x < 128; t++) {
-        int gi = (*t >= '0' && *t <= '9') ? *t - '0' : (*t == ':' ? 10 : 11);
+        int gi = digit_glyph(&t);
         const uint8_t *g = d->data + (size_t)gi * d->h * d->by;
         for (int row = 0; row < d->h; row++)
             for (int col = 0; col < d->w; col++)
@@ -1044,7 +1056,7 @@ static void handle(char *line)
         if (a) font_id = (uint8_t)(atoi(a) % FONT_COUNT);
         int h = font_height(font_id);
         upf("шрифт %d = %s, высота %d%s\r\n", font_id, font_name(font_id), h,
-            font_id >= FONT_TEXT_COUNT ? " (только цифры и двоеточие)" : "");
+            font_id >= FONT_TEXT_COUNT ? " (цифры и знаки :.,-+/ и градус)" : "");
     }
     else if (!strcmp(c, "pxc"))    {   /* pxc X Y — погасить точку */
         if (a && b) { anim = 0; demo_on = 0; fb_set(atoi(a), 31 - atoi(b), 0); up("ok\r\n"); }
