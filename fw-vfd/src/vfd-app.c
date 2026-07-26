@@ -286,12 +286,12 @@ static uint8_t clk_set = 0;                 /* какой набор цифр, �
    digits.h, поэтому набор и код не могут разъехаться. Знак градуса приходит в
    UTF-8 двумя байтами (0xC2 0xB0) — съедаем второй сами. Неизвестный знак
    выводим пробелом: в наборах только цифры и знаки при них. */
-static int digit_glyph(const char **pt)
+static int digit_glyph_in(const digits_t *d, const char **pt)
 {
     const unsigned char *p = (const unsigned char *)*pt;
-    if (p[0] == 0xC2 && p[1] == 0xB0) { (*pt)++; return DIGIT_DEGREE_INDEX; }
-    const char *q = strchr(DIGIT_CHARS, (char)p[0]);
-    return (q && *q) ? (int)(q - DIGIT_CHARS) : DIGIT_SPACE_INDEX;
+    if (p[0] == 0xC2 && p[1] == 0xB0) { (*pt)++; return d->deg; }   /* градус, UTF-8 */
+    const char *q = strchr(d->chars, (char)p[0]);
+    return (q && *q) ? (int)(q - d->chars) : DIGIT_SPACE_INDEX;
 }
 
 /* Наборы цифр доступны как обычные шрифты: 0..2 — текстовые, дальше цифровые.
@@ -314,7 +314,7 @@ static void fb_digits_set(int x, int y, const char *t, int set)
 {
     const digits_t *d = &DIGITS[set % DIGITS_COUNT];
     for (; *t && x < 128; t++) {
-        int gi = digit_glyph(&t);
+        int gi = digit_glyph_in(d, &t);
         const uint8_t *g = d->data + (size_t)gi * d->h * d->by;
         for (int row = 0; row < d->h; row++)
             for (int col = 0; col < d->w; col++)
@@ -328,7 +328,7 @@ static void fb_digits(int x, int y, const char *t)
 {
     const digits_t *d = &DIGITS[clk_set];
     for (; *t && x < 128; t++) {
-        int gi = digit_glyph(&t);
+        int gi = digit_glyph_in(d, &t);
         const uint8_t *g = d->data + (size_t)gi * d->h * d->by;
         for (int row = 0; row < d->h; row++)
             for (int col = 0; col < d->w; col++)
