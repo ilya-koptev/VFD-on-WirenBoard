@@ -862,6 +862,15 @@ static void handle(char *line)
             upf("hv=%c\r\n", (a && a[0] == '0') ? '0' : '1');
         }
     }
+    else if (!strcmp(c, "boot"))   {   /* уйти в загрузчик для обновления по UART */
+        /* Магия в верхних байтах ОЗУ переживает сброс: загрузчик увидит её и
+           останется ждать прошивку вместо прыжка сюда. Тот же путь, каким по
+           Modbus работает запись 1 в регистр 129. */
+        up("уходим в загрузчик, 9600 8N2\r\n");
+        while (txtail != txhead) { }             /* дождаться, пока ответ уйдёт */
+        *(volatile uint32_t *)0x2001FFF0U = 0xB007574FU;
+        NVIC_SystemReset();
+    }
     else if (!strcmp(c, "st"))     { print_st(); }
     else if (!strcmp(c, "help") || !strcmp(c, "?")) {
         up("\r\n=== MN12832L, 128x32: команды консоли (115200, Enter в конце) ===\r\n");
@@ -910,6 +919,11 @@ static void handle(char *line)
 
 int main(void)
 {
+    /* Приложение слинковано на 0x08004000, в начале флеша сидит загрузчик.
+       Таблицу векторов переставляем сами: так не зависим от того, с каким
+       VECT_TAB_OFFSET собран system_stm32f4xx.c в пакете PlatformIO. */
+    SCB->VTOR = 0x08004000U;
+
     HAL_Init();
     SystemClock_Config();       /* 100 МГц: без этого битбенг не выдаёт 100 Гц кадра */
     dwt_init();
