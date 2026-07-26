@@ -772,6 +772,10 @@ static int blank_only(const char *s)
    что и размещение строк, поэтому вводятся они так же свободно. */
 static char mb_graph[GRAPH_LINES][GRAPH_LEN + 1];
 
+/* Прямоугольник последнего нарисованного текста каждой строки: по нему
+   стирается прежний текст при построчной перерисовке. */
+static struct { int16_t x, y, w, h; } ln_box[TEXT_LINES];
+
 /* Стереть всё содержимое: строки, их параметры и примитивы. Дёргается записью
    1 в регистр очистки — в интерфейсе это кнопка. */
 static void mb_clear_all(void)
@@ -779,6 +783,7 @@ static void mb_clear_all(void)
     memset(mb_text, 0, sizeof mb_text);
     memset(mb_params, 0, sizeof mb_params);
     memset(mb_graph, 0, sizeof mb_graph);
+    memset(ln_box, 0, sizeof ln_box);
     mb_text_dirty = 1;
 }
 
@@ -818,34 +823,103 @@ static void mb_graph_pending(void)
     if (mb_graph_new) { mb_graph_new = 0; dirty = 1; }
 }
 
-static void mb_text_redraw(void)
+/* ---------- построчная перерисовка ----------
+   Порядок работы такой: сперва регистрами выкладывается графика, потом задаются
+   координаты и шрифты строк, а дальше меняются только тексты. Поэтому кадр целиком
+   НЕ перерисовывается: гасится только прямоугольник прежнего текста этой строки, и
+   на его месте рисуется новый. Всё остальное — графика и соседние строки —
+   остаётся нетронутым. */
+static uint8_t mb_text_new = 0;         /* биты строк, которые надо перерисовать */
+
+/* Ширина строки в точках для выбранного шрифта */
+static int text_width(int fnt, const char *s)
+{
+    if (fnt >= FONT_TEXT_COUNT) {
+        const digits_t *d = &DIGITS[fnt - FONT_TEXT_COUNT];
+        int n = 0;
+        for (const char *q = s; *q; q++)
+            if (((uint8_t)*q & 0xC0) != 0x80) n++;      /* двухбайтовые считаем раз */
+        return n * (d->w + 1);
+    }
+    const font_t *f = &FONTS[fnt];
+    int w = 0;
+    for (const char *q = s; *q; q++)
+        if (((uint8_t)*q & 0xC0) != 0x80) w += f->w + 1;
+    return w;
+}
+
+static void fb_clear_rect(int x, int y, int w, int h)
+{
+    for (int dy = 0; dy < h; dy++)
+        for (int dx = 0; dx < w; dx++) {
+            int px = x + dx, py = y + dy;
+            if (px >= 0 && px < 128 && py >= 0 && py < 32) fb_set(px, 31 - py, 0);
+        }
+}
+
+/* Геометрия строки: координаты из её поля параметров либо автоукладка сверху вниз.
+   Автоукладка считается по строкам выше, поэтому не зависит от порядка обновления. */
+static void line_geom(int ln, int *x, int *y, int *fnt)
+{
+    *fnt = font_id;
+    *x = 0;
+    *y = -1;
+    int got = params_parse(mb_params[ln], x, y, fnt);
+    if (*fnt < 0 || *fnt >= FONT_COUNT) *fnt = font_id;
+    if (got >= 2 && *y >= 0) return;                    /* координаты заданы */
+
+    int auto_y = 32;
+    for (int i = 0; i <= ln; i++) {
+        if (i != ln && blank_only(mb_text[i])) continue;
+        int fx = 0, fy = -1, ff = font_id;
+        int g = params_parse(mb_params[i], &fx, &fy, &ff);
+        if (ff < 0 || ff >= FONT_COUNT) ff = font_id;
+        if (g >= 2 && fy >= 0) continue;                /* строка стоит на своих координатах */
+        auto_y -= font_height(ff) + 1;
+    }
+    *y = auto_y;
+    if (got < 1) *x = 0;
+}
+
+static void mb_line_update(int ln)
 {
     uint8_t save = font_id;
-    int auto_y = 32;                    /* курсор автоукладки: ноль поля внизу */
 
-    fb_clear();
-    for (int ln = 0; ln < TEXT_LINES; ln++) {
-        mb_text[ln][TEXT_LEN] = 0;
-        mb_params[ln][TEXT_PARAMS_LEN] = 0;
-        if (blank_only(mb_text[ln])) continue;      /* пробел = пусто */
+    mb_text[ln][TEXT_LEN] = 0;
+    mb_params[ln][TEXT_PARAMS_LEN] = 0;
 
-        int x = 0, y = -1, fnt = save;
-        int got = params_parse(mb_params[ln], &x, &y, &fnt);
-        if (fnt < 0 || fnt >= FONT_COUNT) fnt = save;
-        font_id = (uint8_t)fnt;
+    if (ln_box[ln].w > 0)              /* стереть прежний текст этой строки */
+        fb_clear_rect(ln_box[ln].x, ln_box[ln].y, ln_box[ln].w, ln_box[ln].h);
+    ln_box[ln].w = 0;
 
-        if (got < 2 || y < 0) {         /* координат нет — укладываем сверху вниз */
-            auto_y -= font_height(fnt) + 1;
-            if (auto_y < 0) { font_id = save; continue; }   /* поле кончилось */
-            y = auto_y;
-            if (got < 1) x = 0;
+    if (!blank_only(mb_text[ln])) {
+        int x, y, fnt;
+        line_geom(ln, &x, &y, &fnt);
+        if (y >= 0) {
+            font_id = (uint8_t)fnt;
+            fb_text(x, y, mb_text[ln]);
+            font_id = save;
+            int w = text_width(fnt, mb_text[ln]);
+            if (x + w > 128) w = 128 - x;
+            ln_box[ln].x = (int16_t)x;
+            ln_box[ln].y = (int16_t)y;
+            ln_box[ln].w = (int16_t)(w > 0 ? w : 0);
+            ln_box[ln].h = (int16_t)font_height(fnt);
         }
-        fb_text(x, y, mb_text[ln]);
     }
-    font_id = save;
-
-    if (fb_inverted) fb_invert_now();
     dirty = 1;
+}
+
+/* Полная выкладка всех строк — при входе в режим текста. Кадр не очищаем: графика,
+   выложенная до этого, должна остаться. */
+static void mb_text_redraw(void)
+{
+    for (int ln = 0; ln < TEXT_LINES; ln++) {
+        ln_box[ln].w = 0;
+        mb_line_update(ln);
+    }
+    if (fb_inverted) fb_invert_now();
+    mb_text_new = 0;
     mb_text_dirty = 0;
 }
 
@@ -1019,14 +1093,15 @@ static int mb_write_reg(uint16_t reg, uint16_t v)
             if (i == 0) memset(mb_text[ln], 0, TEXT_LEN + 1);
             mb_text[ln][i] = (char)(v >> 8);
             mb_text[ln][i + 1] = (char)(v & 0xFF);
+            mb_text_new |= (uint8_t)(1u << ln);      /* перерисуем только эту строку */
         } else {
             uint16_t i = (uint16_t)((r - TEXT_PARAMS_OFF) * 2);
             if (i + 1 >= TEXT_PARAMS_LEN) return 0;
             if (i == 0) memset(mb_params[ln], 0, TEXT_PARAMS_LEN + 1);
             mb_params[ln][i] = (char)(v >> 8);
             mb_params[ln][i + 1] = (char)(v & 0xFF);
+            mb_text_new |= (uint8_t)(1u << ln);      /* сменилось размещение строки */
         }
-        mb_text_dirty = 1;
         return 1;
     }
 
@@ -1305,6 +1380,11 @@ static void app_loop(void)
         if (dirty) rebuild();
         scan_frame();
         if (mb_text_dirty && anim == 0) mb_text_redraw();
+        if (mb_text_new && anim == 0) {              /* перерисовать только изменённые строки */
+            for (int ln = 0; ln < TEXT_LINES; ln++)
+                if (mb_text_new & (1u << ln)) mb_line_update(ln);
+            mb_text_new = 0;
+        }
         if (mb_graph_new && anim == 0) mb_graph_pending();   /* примитивы копятся */
         if (boot_request) {                       /* ответ уже в очереди — дождёмся и уйдём */
             while (uart_tx_busy()) { }
