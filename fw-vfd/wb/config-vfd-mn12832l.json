@@ -170,7 +170,7 @@
         "address": 17,
         "type": "range",
         "min": 0,
-        "max": 5,
+        "max": 6,
         "group": "view",
         "enabled": false
       },

@@ -71,11 +71,14 @@ static const char DIGIT_CHARS[] = "0123456789 :.,-+/";
 #define DIGIT_SPACE_INDEX 10
 #define DIGIT_DEGREE_INDEX 17      /* последний глиф: знак градуса */
 
+#include "digits_ttf.h"
+
 /* описание наборов: data, ширина, высота, байт в строке, влезают ли секунды */
 typedef struct { const uint8_t *data; uint8_t w, h, by, secs; const char *name; } digits_t;
-#define DIGITS_COUNT 3
+#define DIGITS_COUNT 4
 static const digits_t DIGITS[DIGITS_COUNT] = {
     { (const uint8_t *)D_profont29, 14, 19, 2, 1, "profont29" },
     { (const uint8_t *)D_CalLite24, 13, 25, 2, 1, "CalLite24" },
     { (const uint8_t *)D_helvB24, 17, 24, 3, 0, "helvB24" },
+    { (const uint8_t *)D_InkyThin, INKY_W, INKY_H, INKY_BY, 1, "InkyThin" },
 };
