@@ -110,7 +110,9 @@ FRAMES=${EQ_FRAMES:-60}
 f=0
 while [ "$f" -lt "$FRAMES" ]; do
     # спектр: у каждого столбца своя фаза, плюс дрожание — получается живая картинка
-    set -- $(awk -v f="$f" -v n="$BARS" 'BEGIN {
+    # весь кадр одной записью в поле Bars: четырнадцать значений в одной
+    # транзакции вместо четырнадцати — кадр 20 мс вместо 240
+    VALS=$(awk -v f="$f" -v n="$BARS" 'BEGIN {
         srand(f)
         for (i = 0; i < n; i++) {
             v = 17 + 13 * sin(f / 3.0 + i * 0.9) * (0.6 + 0.4 * rand())
@@ -118,11 +120,7 @@ while [ "$f" -lt "$FRAMES" ]; do
             printf "%d ", v
         }
     }')
-    i=1
-    for v in "$@"; do
-        if [ "$i" -le 7 ]; then pub "Text $i" "$v"; else pub "Place $((i - 7))" "$v"; fi
-        i=$((i + 1))
-    done
+    pub Bars "$VALS"
     f=$((f + 1))
 done
 

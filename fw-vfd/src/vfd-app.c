@@ -587,6 +587,8 @@ static void mb_text_redraw(void);       /* определения ниже, у �
 static void clk_tick_reset(void);
 static void mb_clear_all(void);
 static uint8_t eq_on;                   /* режим эквалайзера, определение ниже */
+static uint8_t eq_pending;              /* пришёл новый список значений */
+static char mb_eq[EQ_LEN + 1];          /* все значения эквалайзера одной строкой */
 static void eq_redraw_all(void);
 
 static void fb_invert_now(void)
@@ -788,6 +790,7 @@ static void mb_clear_all(void)
     memset(mb_text, 0, sizeof mb_text);
     memset(mb_params, 0, sizeof mb_params);
     memset(mb_graph, 0, sizeof mb_graph);
+    memset(mb_eq, 0, sizeof mb_eq);
     memset(ln_box, 0, sizeof ln_box);
     mb_text_dirty = 1;
 }
@@ -947,7 +950,14 @@ static void eq_redraw_all(void)
 {
     int val[EQ_SRC], n = 0;
 
-    for (int i = 0; i < EQ_SRC; i++) {
+    mb_eq[EQ_LEN] = 0;
+    if (!blank_only(mb_eq)) {                    /* быстрый путь: всё одной записью */
+        n = nums_parse(mb_eq, val, EQ_SRC);
+        for (int i = 0; i < n; i++)
+            val[i] = val[i] < 0 ? 0 : (val[i] > EQ_VMAX ? EQ_VMAX : val[i]);
+    }
+
+    for (int i = 0; n == 0 && i < EQ_SRC; i++) {
         const char *src = eq_src(i);
         int v[1];
         if (blank_only(src)) continue;
@@ -1129,6 +1139,13 @@ static uint16_t mb_read_reg(uint16_t reg)
         }
     }
 
+    /* список значений эквалайзера: 48 байт одной записью */
+    if (reg >= REGMAP_ADDR_EQ && reg < REGMAP_ADDR_EQ + EQ_LEN / 2) {
+        uint16_t i = (uint16_t)((reg - REGMAP_ADDR_EQ) * 2);
+        if (i == 0 && !mb_eq[0]) return (uint16_t)(' ' << 8);
+        return (uint16_t)(((uint8_t)mb_eq[i] << 8) | (uint8_t)mb_eq[i + 1]);
+    }
+
     /* примитивы: три поля по 16 байт, пустое отдаём пробелом, как и строки */
     if (reg >= REGMAP_ADDR_LINE && reg < REGMAP_ADDR_LINE + GRAPH_LINES * 0x10) {
         uint16_t g = (uint16_t)((reg - REGMAP_ADDR_LINE) / 0x10);
@@ -1190,6 +1207,15 @@ static int mb_write_reg(uint16_t reg, uint16_t v)
             mb_params[ln][i + 1] = (char)(v & 0xFF);
             mb_text_new |= (uint8_t)(1u << ln);      /* сменилось размещение строки */
         }
+        return 1;
+    }
+
+    if (reg >= REGMAP_ADDR_EQ && reg < REGMAP_ADDR_EQ + EQ_LEN / 2) {
+        uint16_t i = (uint16_t)((reg - REGMAP_ADDR_EQ) * 2);
+        if (i == 0) memset(mb_eq, 0, sizeof mb_eq);   /* новое значение целиком */
+        mb_eq[i] = (char)(v >> 8);
+        mb_eq[i + 1] = (char)(v & 0xFF);
+        if (eq_on) eq_pending = 1;
         return 1;
     }
 
@@ -1468,6 +1494,7 @@ static void app_loop(void)
         if (dirty) rebuild();
         scan_frame();
         if (mb_text_dirty && anim == 0) mb_text_redraw();
+        if (eq_pending && anim == 0) { eq_pending = 0; eq_redraw_all(); }
         if (mb_text_new && anim == 0) {              /* перерисовать только изменённые строки */
             for (int ln = 0; ln < TEXT_LINES; ln++)
                 if (mb_text_new & (1u << ln)) {
