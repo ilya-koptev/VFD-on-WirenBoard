@@ -537,7 +537,12 @@ static void scan_frame(void)
         delay_us(cfg.blk_us);
         lat_pulse();
         blk_show();
+        /* Показ длится ровно окно cfg.on_us, дальше гасим и досиживаем слот в
+           темноте. Раньше гашения тут не было: поле светилось до начала
+           следующего слота, светимость задавал весь слот, а cfg.on_us только
+           переставлял, где ждать — поэтому регулировка почти ничего не давала. */
         if (cfg.on_us) delay_us(cfg.on_us);
+        blk_blank();
         wait_cycles_from(t0, cfg.slotus * (SystemCoreClock / 1000000U));                                        /* период слота */
     }
 }
