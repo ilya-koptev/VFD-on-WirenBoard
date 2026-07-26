@@ -34,12 +34,12 @@ scale_y() { awk -v v="$1" -v vm="$VMAX" -v yt="$YTOP" 'BEGIN { printf "%d", v / 
 
 pass=0
 while [ "$pass" -lt "$PASSES" ]; do
-    pub Mode 0; sleep 1        # очистка: стирает и строки, и графику
-    pub Mode 1; sleep 1
+    pub Mode 0; sleep 0.5        # очистка: стирает и строки, и графику
+    pub Mode 1; sleep 0.5
 
     # --- слева рамки под значения ---
-    pub Rect "0 17 40 31"; sleep 1
-    pub Rect "0 0 40 15";  sleep 1
+    pub Rect "0 17 40 31"; sleep 0.5
+    pub Rect "0 0 40 15";  sleep 0.5
     # Число крупным шрифтом 2 (7x13), единица мелким рядом: «10,5 В» целиком
     # шрифтом 2 занимает 48 точек, а ячейка всего 40, поэтому единицы вынесены в
     # отдельные строки 6 и 7 — они статичны и перерисовке не мешают.
@@ -64,13 +64,13 @@ while [ "$pass" -lt "$PASSES" ]; do
         pub "Place $line" "$lx $ly 0"
         pub "Text $line" "$v"
         pub Line "54 $y 56 $y"  # засечка
-        sleep 1
+        sleep 0.5
         line=$((line + 1))
     done
 
     # --- оси ---
-    pub Line "$AX 0 $AX 31";  sleep 1      # вертикальная
-    pub Line "$AX 0 $XN 0";   sleep 1      # нулевая линия
+    pub Line "$AX 0 $AX 31";  sleep 0.5      # вертикальная
+    pub Line "$AX 0 $XN 0";   sleep 0.5      # нулевая линия
 
     # --- два графика: по две точки за шаг, без паузы между ними ---
     x=$((AX + STEP))
