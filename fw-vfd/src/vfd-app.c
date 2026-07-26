@@ -622,6 +622,9 @@ static void mode_apply(uint16_t m)
     case VFD_MODE_LOGO:  anim = 2; break;
     case VFD_MODE_CUBE:  anim = 1; break;
     case VFD_MODE_DEMO:  demo_on = 1; anim = 1; break;
+    case VFD_MODE_IMAGE:                        /* окно картинки ещё не написано */
+        up("режим картинки пока не реализован\r\n");
+        break;
     default: break;
     }
 }
@@ -866,7 +869,9 @@ static int mb_write_reg(uint16_t reg, uint16_t v)
     }
 
     switch (reg) {
-    case REGMAP_ADDR_CONTROL + 0: mode_apply(v); return 1;
+    case REGMAP_ADDR_CONTROL + 0:
+        if (v > VFD_MODE_MAX_WORKING) return 0;   /* картинка ещё не реализована */
+        mode_apply(v); return 1;
     case REGMAP_ADDR_CONTROL + 1: if (v < FONT_COUNT) font_id = (uint8_t)v; return 1;
     case REGMAP_ADDR_CONTROL + 2: if (v < DIGITS_COUNT) clk_set = (uint8_t)v; return 1;
     case REGMAP_ADDR_CONTROL + 3: return 1;                     /* раскладка часов сама */
