@@ -75,10 +75,13 @@ static const char DIGIT_CHARS[] = "0123456789 :.,-+/";
 
 /* описание наборов: data, ширина, высота, байт в строке, влезают ли секунды */
 typedef struct { const uint8_t *data; uint8_t w, h, by, secs; const char *name; } digits_t;
-#define DIGITS_COUNT 4
+#define DIGITS_COUNT 7
 static const digits_t DIGITS[DIGITS_COUNT] = {
     { (const uint8_t *)D_profont29, 14, 19, 2, 1, "profont29" },
     { (const uint8_t *)D_CalLite24, 13, 25, 2, 1, "CalLite24" },
     { (const uint8_t *)D_helvB24, 17, 24, 3, 0, "helvB24" },
-    { (const uint8_t *)D_InkyThin, INKY_W, INKY_H, INKY_BY, 1, "InkyThin" },
+    { (const uint8_t *)D_InkyThin, INKYTHIN_W, INKYTHIN_H, INKYTHIN_BY, 1, "InkyThin" },
+    { (const uint8_t *)D_KernelNBP, KERNELNBP_W, KERNELNBP_H, KERNELNBP_BY, 1, "KernelNBP" },
+    { (const uint8_t *)D_Pixeloza, PIXELOZA_W, PIXELOZA_H, PIXELOZA_BY, 1, "Pixeloza" },
+    { (const uint8_t *)D_Wario, WARIO_W, WARIO_H, WARIO_BY, 0, "Wario" },
 };
